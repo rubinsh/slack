@@ -46,3 +46,5 @@ require (
 )
 
 replace github.com/slack-go/slack => github.com/beeper/slackgo v0.0.0-20261015121614-caa8a716ef7e
+
+replace maunium.net/go/mautrix => ./third_party/mautrix-go
