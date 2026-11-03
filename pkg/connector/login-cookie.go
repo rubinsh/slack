@@ -38,6 +38,10 @@ func (s *SlackConnector) GetLoginFlows() []bridgev2.LoginFlow {
 		Description: "Sign in with your Slack email address",
 		ID:          LoginFlowIDEmail,
 	}, {
+		Name:        "Slack QR code",
+		Description: "Sign in with Slack's Sign in on mobile QR code",
+		ID:          LoginFlowIDQR,
+	}, {
 		Name:        "Auth token & cookie",
 		Description: "Log in with an auth token (and a cookie, if the token is from a browser)",
 		ID:          LoginFlowIDAuthToken,
@@ -50,6 +54,8 @@ func (s *SlackConnector) GetLoginFlows() []bridgev2.LoginFlow {
 
 func (s *SlackConnector) CreateLogin(ctx context.Context, user *bridgev2.User, flowID string) (bridgev2.LoginProcess, error) {
 	switch flowID {
+	case LoginFlowIDQR:
+		return &SlackQRLogin{User: user}, nil
 	case LoginFlowIDEmail:
 		return &SlackEmailLogin{
 			User: user,

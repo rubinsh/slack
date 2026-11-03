@@ -77,10 +77,11 @@ func (f *fakeSlackEmailLoginAPI) SubmitTwoFactor(_ context.Context, _ *slackLogi
 
 func TestSlackLoginFlowsPreferNativeEmail(t *testing.T) {
 	flows := (&SlackConnector{}).GetLoginFlows()
-	require.Len(t, flows, 3)
+	require.Len(t, flows, 4)
 	assert.Equal(t, LoginFlowIDEmail, flows[0].ID)
-	assert.Equal(t, LoginFlowIDAuthToken, flows[1].ID)
-	assert.Equal(t, LoginFlowIDApp, flows[2].ID)
+	assert.Equal(t, LoginFlowIDQR, flows[1].ID)
+	assert.Equal(t, LoginFlowIDAuthToken, flows[2].ID)
+	assert.Equal(t, LoginFlowIDApp, flows[3].ID)
 }
 
 func TestSlackLoginFlowsKeepEmailNativeAndTokenWebview(t *testing.T) {
