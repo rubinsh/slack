@@ -89,58 +89,65 @@ func TestSlackQRRedirectCookieAndToken(t *testing.T) {
 }
 
 func TestSlackQRRequiredTwoFactorAndRetry(t *testing.T) {
-	calls, posts, completed := 0, 0, 0
-	a := qrTestAPI(func(r *http.Request) (*http.Response, error) {
-		assertSlackQRRequestProfile(t, r)
-		calls++
-		if r.URL.Hostname() == "app.slack.com" {
-			return qrResponse(r, 302, "", "Location", "https://acme.slack.com"+qrSyntheticPath), nil
-		}
-		if r.URL.Path == "/ssb/redirect" {
-			return qrResponse(r, 200, `{"api_token":"xoxc-synthetic"}`), nil
-		}
-		require.Equal(t, qrSyntheticPath, r.URL.Path)
-		if r.Method == http.MethodPost {
-			posts++
-			require.NoError(t, r.ParseForm())
-			assert.Equal(t, "123456", r.PostForm.Get("2fa_code"))
-			assert.Equal(t, "submit_primary", r.PostForm.Get("2fa_action"))
-			assert.Equal(t, "test@example.invalid", r.URL.Query().Get("email"))
-			assert.Equal(t, "acme", r.URL.Query().Get("domain"))
-			if posts == 1 {
-				assert.Equal(t, "synthetic-magic", r.PostForm.Get("2fa_magiclogin"))
-				return qrResponse(r, 200, qrProps("synthetic-retry")), nil
-			}
-			assert.Equal(t, "synthetic-retry", r.PostForm.Get("2fa_magiclogin"))
-			return qrResponse(r, 303, "", "Set-Cookie", "d=xoxd-synthetic; Domain=.slack.com; Path=/; Secure", "Location", "/client"), nil
-		}
-		return qrResponse(r, 200, qrProps("synthetic-magic")), nil
-	})
-	p := &SlackQRLogin{api: a, complete: func(ctx context.Context, u *bridgev2.User, token, cookie string) (*bridgev2.LoginStep, error) {
-		completed++
-		assert.Equal(t, "xoxc-synthetic", token)
-		assert.Equal(t, "xoxd-synthetic", cookie)
-		return &bridgev2.LoginStep{Type: bridgev2.LoginStepTypeComplete}, nil
-	}}
-	step, err := p.SubmitUserInput(context.Background(), map[string]string{loginFieldQR: qrSyntheticURL})
-	require.NoError(t, err)
-	assert.Equal(t, LoginStepIDTwoFactor, step.StepID)
-	assert.Zero(t, completed)
-	before := calls
-	step, err = p.SubmitUserInput(context.Background(), map[string]string{loginFieldTwoFactorCode: "not-a-code"})
-	require.NoError(t, err)
-	assert.Equal(t, LoginStepIDTwoFactor, step.StepID)
-	assert.Equal(t, before, calls)
-	step, err = p.SubmitUserInput(context.Background(), map[string]string{loginFieldTwoFactorCode: "123456"})
-	require.NoError(t, err)
-	assert.Equal(t, LoginStepIDTwoFactor, step.StepID)
-	assert.Zero(t, completed)
-	step, err = p.SubmitUserInput(context.Background(), map[string]string{loginFieldTwoFactorCode: "123456"})
-	require.NoError(t, err)
-	assert.Equal(t, bridgev2.LoginStepTypeComplete, step.Type)
-	assert.Equal(t, 1, completed)
-	_, err = p.SubmitUserInput(context.Background(), map[string]string{loginFieldQR: qrSyntheticURL})
-	assert.ErrorIs(t, err, context.Canceled)
+	for _, challengePath := range []string{qrSyntheticPath, strings.TrimPrefix(qrSyntheticPath, "/login")} {
+		t.Run(challengePath, func(t *testing.T) {
+			calls, posts, completed := 0, 0, 0
+			a := qrTestAPI(func(r *http.Request) (*http.Response, error) {
+				assertSlackQRRequestProfile(t, r)
+				calls++
+				if r.URL.Hostname() == "app.slack.com" {
+					if r.URL.Path != "/app-redir" {
+						return qrResponse(r, 302, "", "Location", "https://app.slack.com/app-redir"), nil
+					}
+					return qrResponse(r, 302, "", "Location", "https://acme.slack.com"+challengePath), nil
+				}
+				if r.URL.Path == "/ssb/redirect" {
+					return qrResponse(r, 200, `{"api_token":"xoxc-synthetic"}`), nil
+				}
+				require.Equal(t, challengePath, r.URL.Path)
+				if r.Method == http.MethodPost {
+					posts++
+					require.NoError(t, r.ParseForm())
+					assert.Equal(t, "123456", r.PostForm.Get("2fa_code"))
+					assert.Equal(t, "submit_primary", r.PostForm.Get("2fa_action"))
+					assert.Equal(t, "test@example.invalid", r.URL.Query().Get("email"))
+					assert.Equal(t, "acme", r.URL.Query().Get("domain"))
+					if posts == 1 {
+						assert.Equal(t, "synthetic-magic", r.PostForm.Get("2fa_magiclogin"))
+						return qrResponse(r, 200, qrProps("synthetic-retry")), nil
+					}
+					assert.Equal(t, "synthetic-retry", r.PostForm.Get("2fa_magiclogin"))
+					return qrResponse(r, 303, "", "Set-Cookie", "d=xoxd-synthetic; Domain=.slack.com; Path=/; Secure", "Location", "/client"), nil
+				}
+				return qrResponse(r, 200, qrProps("synthetic-magic")), nil
+			})
+			p := &SlackQRLogin{api: a, complete: func(ctx context.Context, u *bridgev2.User, token, cookie string) (*bridgev2.LoginStep, error) {
+				completed++
+				assert.Equal(t, "xoxc-synthetic", token)
+				assert.Equal(t, "xoxd-synthetic", cookie)
+				return &bridgev2.LoginStep{Type: bridgev2.LoginStepTypeComplete}, nil
+			}}
+			step, err := p.SubmitUserInput(context.Background(), map[string]string{loginFieldQR: qrSyntheticURL})
+			require.NoError(t, err)
+			assert.Equal(t, LoginStepIDTwoFactor, step.StepID)
+			assert.Zero(t, completed)
+			before := calls
+			step, err = p.SubmitUserInput(context.Background(), map[string]string{loginFieldTwoFactorCode: "not-a-code"})
+			require.NoError(t, err)
+			assert.Equal(t, LoginStepIDTwoFactor, step.StepID)
+			assert.Equal(t, before, calls)
+			step, err = p.SubmitUserInput(context.Background(), map[string]string{loginFieldTwoFactorCode: "123456"})
+			require.NoError(t, err)
+			assert.Equal(t, LoginStepIDTwoFactor, step.StepID)
+			assert.Zero(t, completed)
+			step, err = p.SubmitUserInput(context.Background(), map[string]string{loginFieldTwoFactorCode: "123456"})
+			require.NoError(t, err)
+			assert.Equal(t, bridgev2.LoginStepTypeComplete, step.Type)
+			assert.Equal(t, 1, completed)
+			_, err = p.SubmitUserInput(context.Background(), map[string]string{loginFieldQR: qrSyntheticURL})
+			assert.ErrorIs(t, err, context.Canceled)
+		})
+	}
 }
 
 func TestSlackQRDoesNotFollowUnsafeRedirects(t *testing.T) {

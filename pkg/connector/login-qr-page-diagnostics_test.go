@@ -64,7 +64,7 @@ func TestSlackQRDiagnosticCompletePropsDoNotRelaxRouteOrOrigin(t *testing.T) {
 	link, err := parseSlackQRLink(qrSyntheticURL)
 	require.NoError(t, err)
 	for _, tc := range []struct{ landing, route, path string }{
-		{"https://acme.slack.com/" + link.secret, "workspace", "secret"},
+		{"https://acme.slack.com/attacker/" + link.secret, "workspace", "other"},
 		{"https://other.slack.com/login/" + link.secret, "other_slack", "login_secret"},
 	} {
 		t.Run(tc.route, func(t *testing.T) {

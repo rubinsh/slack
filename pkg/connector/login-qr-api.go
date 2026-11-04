@@ -161,7 +161,13 @@ func (s *slackQRAPI) walk(ctx context.Context, link *slackQRLink, method string,
 }
 
 func qrConfirmationURL(u *url.URL, link *slackQRLink) bool {
-	return link != nil && safeSlackQRURL(u) && u.Hostname() == link.workspace+".slack.com" && u.EscapedPath() == "/login/"+link.secret
+	if link == nil || link.secret == "" || !safeSlackQRURL(u) || u.Hostname() != link.workspace+".slack.com" {
+		return false
+	}
+	// Allow the legacy path and the observed original-secret root path.
+	// Never accept arbitrary prefixes, suffixes, or a different QR credential.
+	path := u.EscapedPath()
+	return path == "/login/"+link.secret || path == "/"+link.secret
 }
 
 func parseQRChallenge(body []byte, target *url.URL, link *slackQRLink) (*slackQRChallenge, slackQRReason) {
