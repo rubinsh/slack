@@ -41,6 +41,10 @@ type slackQRChallenge struct {
 	url          *url.URL
 	magic, email string
 }
+type slackQRChallengeProperties struct {
+	Magic string `json:"magicLogin"`
+	Email string `json:"emailAddress"`
+}
 type slackQRResult struct {
 	token, cookie string
 	challenge     *slackQRChallenge
@@ -139,7 +143,7 @@ func (s *slackQRAPI) walk(ctx context.Context, link *slackQRLink, method string,
 		if challenge != nil {
 			return &slackQRResult{challenge: challenge}, nil
 		}
-		detail := s.diagnosticDetail(target, link)
+		detail := s.diagnosticDetail(target, link, body)
 		if detail.route == qrRouteWorkspace {
 			if denial := slackQRPageDenial(body); denial != qrReasonNone {
 				logSlackQRDiagnostic(ctx, denial, phase, status, hop+1, detail)
@@ -164,6 +168,16 @@ func parseQRChallenge(body []byte, target *url.URL, link *slackQRLink) (*slackQR
 	if !qrConfirmationURL(target, link) {
 		return nil, qrUnexpectedChallengeRoute
 	}
+	parsed, reason := parseQRChallengeProperties(body)
+	if parsed == nil {
+		return nil, reason
+	}
+	copyURL := *target
+	return &slackQRChallenge{link: link, url: &copyURL, magic: parsed.Magic, email: parsed.Email}, qrReasonNone
+}
+
+// Parsing shape alone does not authorize a confirmation URL or request.
+func parseQRChallengeProperties(body []byte) (*slackQRChallengeProperties, slackQRReason) {
 	tokenizer := html.NewTokenizer(strings.NewReader(string(body)))
 	for {
 		kind := tokenizer.Next()
@@ -186,18 +200,14 @@ func parseQRChallenge(body []byte, target *url.URL, link *slackQRLink) (*slackQR
 		if id != "props_node" {
 			continue
 		}
-		var parsed struct {
-			Magic string `json:"magicLogin"`
-			Email string `json:"emailAddress"`
-		}
+		var parsed slackQRChallengeProperties
 		if json.Unmarshal([]byte(props), &parsed) != nil {
 			return nil, qrInvalidChallengeProps
 		}
 		if parsed.Magic == "" || parsed.Email == "" {
 			return nil, qrMissingChallengeFields
 		}
-		copyURL := *target
-		return &slackQRChallenge{link: link, url: &copyURL, magic: parsed.Magic, email: parsed.Email}, qrReasonNone
+		return &parsed, qrReasonNone
 	}
 }
 
@@ -241,7 +251,7 @@ func (s *slackQRAPI) session(ctx context.Context, link *slackQRLink) (*slackQRRe
 		}
 		match := qrWebTokenPattern.FindSubmatch(body)
 		if match == nil {
-			logSlackQRDiagnostic(ctx, qrMissingSessionToken, qrPhaseSession, status, hop+1, s.diagnosticDetail(target, link))
+			logSlackQRDiagnostic(ctx, qrMissingSessionToken, qrPhaseSession, status, hop+1, s.diagnosticDetail(target, link, body))
 			return nil, errSlackQRBrowser
 		}
 		cookie := s.cookie(link)

@@ -4,6 +4,7 @@ package connector
 import (
 	"context"
 	"net/url"
+	"strings"
 
 	"github.com/rs/zerolog"
 )
@@ -86,12 +87,105 @@ func (r slackQRRoute) String() string {
 	return names[r]
 }
 
+type slackQRPath uint8
+
+const (
+	qrPathUnknown slackQRPath = iota
+	qrPathLoginSecret
+	qrPathSecret
+	qrPathRoot
+	qrPathSignin
+	qrPathSSB
+	qrPathCheckcookie
+	qrPathAppRedirect
+	qrPathClient
+	qrPathMessages
+	qrPathLoginOther
+	qrPathOther
+)
+
+func (p slackQRPath) String() string {
+	names := [...]string{"unknown", "login_secret", "secret", "root", "signin", "ssb", "checkcookie", "app_redirect", "client", "messages", "login_other", "other"}
+	if int(p) >= len(names) {
+		return "unknown"
+	}
+	return names[p]
+}
+
+func slackQRPathClass(target *url.URL, link *slackQRLink) slackQRPath {
+	if !safeSlackQRURL(target) {
+		return qrPathUnknown
+	}
+	path := target.EscapedPath()
+	if link != nil && link.secret != "" {
+		if path == "/login/"+link.secret {
+			return qrPathLoginSecret
+		}
+		if path == "/"+link.secret {
+			return qrPathSecret
+		}
+	}
+	if path == "" || path == "/" {
+		return qrPathRoot
+	}
+	for _, route := range []struct {
+		prefix string
+		class  slackQRPath
+	}{
+		{"/signin", qrPathSignin}, {"/ssb", qrPathSSB}, {"/checkcookie", qrPathCheckcookie},
+		{"/app-redir", qrPathAppRedirect}, {"/client", qrPathClient}, {"/messages", qrPathMessages},
+		{"/login", qrPathLoginOther},
+	} {
+		if path == route.prefix || strings.HasPrefix(path, route.prefix+"/") {
+			return route.class
+		}
+	}
+	return qrPathOther
+}
+
+type slackQRProps uint8
+
+const (
+	qrPropsUnknown slackQRProps = iota
+	qrPropsNotFound
+	qrPropsInvalid
+	qrPropsIncomplete
+	qrPropsPresent
+)
+
+func (p slackQRProps) String() string {
+	names := [...]string{"unknown", "not_found", "invalid", "incomplete", "present"}
+	if int(p) >= len(names) {
+		return "unknown"
+	}
+	return names[p]
+}
+
+func slackQRPropsClass(body []byte) slackQRProps {
+	props, reason := parseQRChallengeProperties(body)
+	if props != nil {
+		return qrPropsPresent
+	}
+	switch reason {
+	case qrMissingChallengeProps:
+		return qrPropsNotFound
+	case qrInvalidChallengeProps:
+		return qrPropsInvalid
+	case qrMissingChallengeFields:
+		return qrPropsIncomplete
+	default:
+		return qrPropsUnknown
+	}
+}
+
 type slackQRDiagnosticDetail struct {
 	route      slackQRRoute
+	path       slackQRPath
+	props      slackQRProps
 	hasDCookie bool
 }
 
-func (s *slackQRAPI) diagnosticDetail(target *url.URL, link *slackQRLink) slackQRDiagnosticDetail {
+func (s *slackQRAPI) diagnosticDetail(target *url.URL, link *slackQRLink, body []byte) slackQRDiagnosticDetail {
 	route := qrRouteUnknown
 	if safeSlackQRURL(target) {
 		switch {
@@ -103,12 +197,13 @@ func (s *slackQRAPI) diagnosticDetail(target *url.URL, link *slackQRLink) slackQ
 			route = qrRouteOtherSlack
 		}
 	}
-	return slackQRDiagnosticDetail{route: route, hasDCookie: link != nil && s.cookie(link) != ""}
+	return slackQRDiagnosticDetail{route: route, path: slackQRPathClass(target, link), props: slackQRPropsClass(body), hasDCookie: link != nil && s.cookie(link) != ""}
 }
 
 // URL paths, response bodies and even transport errors may contain credentials.
 // This boundary accepts only fixed enums, bounded numbers and a cookie-presence
-// bit. Optional detail is present only where the workspace and target are known.
+// bit. Properties describe shape only, never whether a nonce is valid. Optional
+// detail is present only where the workspace, target and response are known.
 func logSlackQRDiagnostic(ctx context.Context, reason slackQRReason, phase slackQRPhase, status, hop int, detail ...slackQRDiagnosticDetail) {
 	if ctx.Err() != nil {
 		return
@@ -125,7 +220,10 @@ func logSlackQRDiagnostic(ctx context.Context, reason slackQRReason, phase slack
 		Int("http_status", status).
 		Int("hop", hop)
 	if len(detail) > 0 {
-		event = event.Str("route_class", detail[0].route.String()).Bool("has_d_cookie", detail[0].hasDCookie)
+		event = event.Str("route_class", detail[0].route.String()).
+			Str("path_class", detail[0].path.String()).
+			Str("props_class", detail[0].props.String()).
+			Bool("has_d_cookie", detail[0].hasDCookie)
 	}
 	event.Msg("Slack QR sign-in could not advance")
 }

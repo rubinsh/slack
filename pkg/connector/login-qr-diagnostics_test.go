@@ -33,8 +33,12 @@ func assertQRDiagnostic(t *testing.T, buffer *bytes.Buffer, reason, phase string
 		assert.Contains(t, []string{"unknown", "app", "workspace", "other_slack"}, route)
 		_, isBool := got["has_d_cookie"].(bool)
 		require.True(t, isBool)
+		assert.Contains(t, []string{"unknown", "login_secret", "secret", "root", "signin", "ssb", "checkcookie", "app_redirect", "client", "messages", "login_other", "other"}, got["path_class"])
+		assert.Contains(t, []string{"unknown", "not_found", "invalid", "incomplete", "present"}, got["props_class"])
 		delete(got, "route_class")
 		delete(got, "has_d_cookie")
+		delete(got, "path_class")
+		delete(got, "props_class")
 	}
 	assert.Equal(t, map[string]any{
 		"level": "warn", "message": "Slack QR sign-in could not advance",
@@ -265,10 +269,12 @@ func TestSlackQRDiagnosticsLandingMetadata(t *testing.T) {
 	}
 	t.Run("unknown enum is bounded", func(t *testing.T) {
 		ctx, buffer := qrDiagnosticContext()
-		logSlackQRDiagnostic(ctx, qrUnexpectedChallengeRoute, qrPhaseBegin, 200, 1, slackQRDiagnosticDetail{route: slackQRRoute(255)})
+		logSlackQRDiagnostic(ctx, qrUnexpectedChallengeRoute, qrPhaseBegin, 200, 1, slackQRDiagnosticDetail{route: slackQRRoute(255), path: slackQRPath(255), props: slackQRProps(255)})
 		var got map[string]any
 		require.NoError(t, json.Unmarshal(buffer.Bytes(), &got))
 		assert.Equal(t, "unknown", got["route_class"])
+		assert.Equal(t, "unknown", got["path_class"])
+		assert.Equal(t, "unknown", got["props_class"])
 		assert.Equal(t, false, got["has_d_cookie"])
 		assertQRDiagnostic(t, buffer, "unexpected_challenge_route", "begin", 200, 1)
 	})
