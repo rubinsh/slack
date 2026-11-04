@@ -72,11 +72,7 @@ func (dp *doublePuppetUtil) newIntent(ctx context.Context, mxid id.UserID, acces
 		return nil, err
 	}
 
-	ia := dp.br.AS.NewIntentAPI("custom")
-	ia.Client = client
-	ia.Localpart, _, _ = mxid.Parse()
-	ia.UserID = mxid
-	ia.IsCustomPuppet = true
+	ia := dp.br.AS.NewDoublePuppetIntent(mxid, client)
 	return ia, nil
 }
 

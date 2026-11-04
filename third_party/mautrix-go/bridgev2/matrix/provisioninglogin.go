@@ -75,8 +75,9 @@ type ProvLogin struct {
 	// requests from any other user must not be able to reach it.
 	Owner id.UserID
 
-	HTTPLock    sync.Mutex
-	fingerprint string
+	HTTPLock            sync.Mutex
+	fingerprint         string
+	acceptsGzipResponse bool
 
 	Ctx       context.Context
 	CancelCtx context.CancelFunc
@@ -117,6 +118,9 @@ func (prov *ProvisioningAPI) PostLoginStart(w http.ResponseWriter, r *http.Reque
 		Owner:     user.MXID,
 		Ctx:       ctx,
 		CancelCtx: cancel,
+
+		// The HTTP over websocket proxy only allows JSON bodies, so the custom gzip format can't be used.
+		acceptsGzipResponse: !prov.br.Websocket,
 		step: &stepManager{
 			started: true,
 			wait:    ch,

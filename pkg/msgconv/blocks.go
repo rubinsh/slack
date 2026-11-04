@@ -116,14 +116,13 @@ func (mc *MessageConverter) attachmentToURLPreview(ctx context.Context, portal *
 			}
 		}
 	}
-	// TODO handle mrkdwn in description? there can at least be links
 	return &event.BeeperLinkPreview{
 		LinkPreview: event.LinkPreview{
 			CanonicalURL: attachment.FromURL,
 			Title:        attachment.Title,
 			SiteName:     attachment.ServiceName,
 			Type:         "website",
-			Description:  attachment.Text,
+			Description:  format.HTMLToText(mc.mrkdwnToMatrixHtml(ctx, attachment.Text, &event.Mentions{})),
 			ImageURL:     mxc,
 			ImageSize:    event.IntOrString(imageSize),
 			ImageWidth:   event.IntOrString(imageWidth),
@@ -219,11 +218,8 @@ func (mc *MessageConverter) renderMessageMention(ctx context.Context, mention *s
 	if mention.ChannelID != "" && ctx.Value(contextKeySource) != nil && mc.Bridge != nil {
 		_, _, channelName = mc.GetMentionedRoomInfo(ctx, mention.ChannelID)
 	}
-	if channelName == "" {
-		channelName = mention.ChannelID
-	}
-	if channelName != "" && !strings.HasPrefix(channelName, "#") {
-		channelName = "#" + channelName
+	if channelName == "" && mention.ChannelID != "" {
+		channelName = "#" + mention.ChannelID
 	}
 
 	var authorName string
@@ -680,7 +676,7 @@ func (mc *MessageConverter) slackBlocksToMatrix(ctx context.Context, portal *bri
 					htmlText.WriteString(fmt.Sprintf("<blockquote>%s</blockquote>", fallback))
 				}
 			}
-		} else if attachment.FromURL != "" && attachment.OriginalURL != "" && attachment.Title != "" && len(attachment.Fields) == 0 && len(attachment.Actions) == 0 {
+		} else if attachment.FromURL != "" && attachment.OriginalURL != "" && attachment.Title != "" && (len(attachment.Fields) == 0 || !attachment.IsAppUnfurl) && len(attachment.Actions) == 0 {
 			urlPreviews = append(urlPreviews, mc.attachmentToURLPreview(ctx, portal, intent, attachment))
 			continue
 		} else if len(attachment.Blocks.BlockSet) > 0 {

@@ -28,6 +28,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/event"
 
 	"go.mau.fi/mautrix-slack/pkg/connector/slackdb"
 	"go.mau.fi/mautrix-slack/pkg/emoji"
@@ -56,11 +57,11 @@ func (s *SlackClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Mat
 	}
 	conv, err := s.Main.MsgConv.ToSlack(ctx, s.Client, msg.Portal, msg.Content, msg.Event, msg.ThreadRoot, nil, msg.OrigSender, s.IsRealUser)
 	if err != nil {
-		return nil, err
+		return nil, wrapSlackConversionError(err)
 	}
 	timestamp, err := s.sendToSlack(ctx, channelID, conv, msg)
 	if err != nil {
-		return nil, err
+		return nil, wrapSlackMatrixError(err)
 	}
 	if timestamp == "" {
 		return &bridgev2.MatrixMessageResponse{Pending: true}, nil
@@ -139,7 +140,12 @@ func (s *SlackClient) sendToSlack(
 		}
 		return resp.FileMsgTS, nil
 	} else {
-		return "", errors.New("no message or attachment to send")
+		return "", bridgev2.WrapErrorInStatus(errors.New("nothing to send")).
+			WithErrorAsMessage().
+			WithIsCertain(true).
+			WithSendNotice(true).
+			WithErrorReason(event.MessageStatusUnsupported).
+			WithStatus(event.MessageStatusFail)
 	}
 }
 
@@ -153,10 +159,130 @@ func (s *SlackClient) HandleMatrixEdit(ctx context.Context, msg *bridgev2.Matrix
 	}
 	conv, err := s.Main.MsgConv.ToSlack(ctx, s.Client, msg.Portal, msg.Content, msg.Event, nil, msg.EditTarget, msg.OrigSender, s.IsRealUser)
 	if err != nil {
-		return err
+		return wrapSlackConversionError(err)
 	}
 	msg.EditTarget.Metadata.(*slackid.MessageMetadata).LastEditTS, err = s.sendToSlack(ctx, channelID, conv, nil)
-	return err
+	return wrapSlackMatrixError(err)
+}
+
+func wrapSlackConversionError(err error) error {
+	if err == nil || errors.As(err, &bridgev2.MessageStatus{}) {
+		return err
+	}
+	if status := msgconvErrorStatus(err); status != nil {
+		return status
+	}
+	if slackAPIErrorCode(err) != "" {
+		return wrapSlackMatrixError(err)
+	}
+	return bridgev2.WrapErrorInStatus(err).
+		WithMessage("failed to prepare message for Slack").
+		WithIsCertain(true).
+		WithSendNotice(true)
+}
+
+func msgconvErrorStatus(err error) error {
+	switch {
+	case errors.Is(err, msgconv.ErrUnknownMsgType):
+		return bridgev2.ErrUnsupportedMessageType
+	case errors.Is(err, msgconv.ErrMediaOnlyEditCaption):
+		return bridgev2.WrapErrorInStatus(err).
+			WithMessage("only the caption of media messages can be edited").
+			WithErrorReason(event.MessageStatusUnsupported).
+			WithStatus(event.MessageStatusFail).
+			WithIsCertain(true).
+			WithSendNotice(true)
+	case errors.Is(err, msgconv.ErrMediaDownloadFailed):
+		return bridgev2.ErrMediaDownloadFailed
+	case errors.Is(err, msgconv.ErrMediaUploadFailed):
+		return bridgev2.ErrMediaReuploadFailed
+	case errors.Is(err, msgconv.ErrMediaConvertFailed):
+		return bridgev2.ErrMediaConvertFailed
+	}
+	return nil
+}
+
+func wrapSlackMatrixError(err error) error {
+	if err == nil || errors.As(err, &bridgev2.MessageStatus{}) {
+		return err
+	}
+	if status := msgconvErrorStatus(err); status != nil {
+		return status
+	}
+	switch slackAPIErrorCode(err) {
+	case "edit_window_closed":
+		return bridgev2.ErrEditTargetTooOld
+	case "cant_update_message", "cant_delete_message":
+		return bridgev2.WrapErrorInStatus(err).
+			WithMessage("you don't have permission to change this message").
+			WithErrorReason(event.MessageStatusNoPermission).
+			WithStatus(event.MessageStatusFail).
+			WithIsCertain(true).
+			WithSendNotice(true)
+	case "message_not_found":
+		return bridgev2.WrapErrorInStatus(err).
+			WithMessage("message not found on Slack").
+			WithStatus(event.MessageStatusFail).
+			WithIsCertain(true).
+			WithSendNotice(true)
+	case "ratelimited", "rate_limited":
+		return bridgev2.WrapErrorInStatus(err).
+			WithMessage("rate limited by Slack").
+			WithErrorReason(event.MessageStatusNetworkError).
+			WithIsCertain(true).
+			WithSendNotice(true)
+	case "not_in_channel", "channel_not_found":
+		return bridgev2.WrapErrorInStatus(err).
+			WithMessage("you don't have access to this Slack channel").
+			WithErrorReason(event.MessageStatusNoPermission).
+			WithStatus(event.MessageStatusFail).
+			WithIsCertain(true).
+			WithSendNotice(true)
+	case "is_archived", "channel_is_archived":
+		return bridgev2.WrapErrorInStatus(err).
+			WithMessage("this Slack channel is archived").
+			WithErrorReason(event.MessageStatusNoPermission).
+			WithStatus(event.MessageStatusFail).
+			WithIsCertain(true).
+			WithSendNotice(true)
+	case "restricted_action", "restricted_action_read_only_channel", "restricted_action_thread_only_channel",
+		"restricted_action_non_threadable_channel", "no_permission", "not_authorized", "access_denied",
+		"ekm_access_denied", "team_access_not_granted", "user_is_restricted", "missing_scope",
+		"cant_invite", "cant_invite_self", "cant_kick_self", "cant_kick_from_general", "cant_leave_general":
+		return bridgev2.WrapErrorInStatus(err).
+			WithMessage("you don't have permission to do that on Slack").
+			WithErrorReason(event.MessageStatusNoPermission).
+			WithStatus(event.MessageStatusFail).
+			WithIsCertain(true).
+			WithSendNotice(true)
+	case "msg_too_long", "too_long":
+		return bridgev2.WrapErrorInStatus(err).
+			WithMessage("message is too long for Slack").
+			WithErrorReason(event.MessageStatusUnsupported).
+			WithStatus(event.MessageStatusFail).
+			WithIsCertain(true).
+			WithSendNotice(true)
+	case "":
+		var statusErr slack.StatusCodeError
+		if errors.As(err, &statusErr) {
+			return bridgev2.WrapErrorInStatus(err).
+				WithMessage("Slack server error").
+				WithErrorReason(event.MessageStatusNetworkError).
+				WithIsCertain(false).
+				WithSendNotice(true)
+		}
+		return bridgev2.WrapErrorInStatus(err).
+			WithMessage("failed to reach Slack").
+			WithErrorReason(event.MessageStatusNetworkError).
+			WithIsCertain(false).
+			WithSendNotice(true)
+	default:
+		return bridgev2.WrapErrorInStatus(err).
+			WithMessage("unexpected error from Slack").
+			WithErrorReason(event.MessageStatusNetworkError).
+			WithIsCertain(true).
+			WithSendNotice(true)
+	}
 }
 
 func (s *SlackClient) HandleMatrixMessageRemove(ctx context.Context, msg *bridgev2.MatrixMessageRemove) error {
@@ -168,7 +294,16 @@ func (s *SlackClient) HandleMatrixMessageRemove(ctx context.Context, msg *bridge
 		return errors.New("invalid message ID")
 	}
 	_, _, err := s.Client.DeleteMessageContext(ctx, channelID, messageID)
-	return err
+	return wrapSlackMatrixError(err)
+}
+
+func unknownEmojiError(key string) error {
+	return bridgev2.WrapErrorInStatus(fmt.Errorf("unknown emoji %q", key)).
+		WithMessage("that emoji isn't available in this Slack workspace").
+		WithIsCertain(true).
+		WithSendNotice(true).
+		WithErrorReason(event.MessageStatusUnsupported).
+		WithStatus(event.MessageStatusFail)
 }
 
 func (s *SlackClient) PreHandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixReaction) (resp bridgev2.MatrixReactionPreResponse, err error) {
@@ -180,14 +315,14 @@ func (s *SlackClient) PreHandleMatrixReaction(ctx context.Context, msg *bridgev2
 		if err != nil {
 			err = fmt.Errorf("failed to get emoji from db: %w", err)
 		} else if dbEmoji == nil {
-			err = fmt.Errorf("unknown emoji %q", key)
+			err = unknownEmojiError(key)
 		} else {
 			emojiID = dbEmoji.EmojiID
 		}
 	} else {
 		emojiID = emoji.GetShortcode(key)
 		if emojiID == "" {
-			err = fmt.Errorf("unknown emoji %q", key)
+			err = unknownEmojiError(key)
 		}
 	}
 	if err != nil {
@@ -211,6 +346,7 @@ func (s *SlackClient) HandleMatrixReaction(ctx context.Context, msg *bridgev2.Ma
 		Channel:   channelID,
 		Timestamp: messageID,
 	})
+	err = wrapSlackMatrixError(err)
 	return
 }
 
@@ -226,10 +362,10 @@ func (s *SlackClient) HandleMatrixReactionRemove(ctx context.Context, msg *bridg
 		Channel:   channelID,
 		Timestamp: messageID,
 	})
-	if err != nil && err.Error() != "reaction" {
-		return err
+	if slackAPIErrorCode(err) == "no_reaction" {
+		return nil
 	}
-	return nil
+	return wrapSlackMatrixError(err)
 }
 
 func (s *SlackClient) HandleMatrixReadReceipt(ctx context.Context, msg *bridgev2.MatrixReadReceipt) error {
@@ -243,7 +379,7 @@ func (s *SlackClient) HandleMatrixReadReceipt(ctx context.Context, msg *bridgev2
 		if !ok {
 			return errors.New("invalid message ID")
 		}
-		return s.Client.MarkConversationContext(ctx, channelID, messageTS)
+		return wrapSlackMatrixError(s.Client.MarkConversationContext(ctx, channelID, messageTS))
 	}
 	lastMessage, err := s.UserLogin.Bridge.DB.Message.GetLastPartAtOrBeforeTime(ctx, msg.Portal.PortalKey, msg.ReadUpTo)
 	if err != nil {
@@ -253,7 +389,7 @@ func (s *SlackClient) HandleMatrixReadReceipt(ctx context.Context, msg *bridgev2
 		if !ok {
 			return errors.New("invalid message ID")
 		}
-		return s.Client.MarkConversationContext(ctx, channelID, messageTS)
+		return wrapSlackMatrixError(s.Client.MarkConversationContext(ctx, channelID, messageTS))
 	}
 	return nil
 }
@@ -261,14 +397,20 @@ func (s *SlackClient) HandleMatrixReadReceipt(ctx context.Context, msg *bridgev2
 func (s *SlackClient) HandleMatrixTyping(ctx context.Context, msg *bridgev2.MatrixTyping) error {
 	if s.Client == nil {
 		return bridgev2.ErrNotLoggedIn
-	} else if !s.IsRealUser {
+	} else if !s.IsRealUser || !msg.IsTyping {
 		return nil
 	}
 	_, channelID := slackid.ParsePortalID(msg.Portal.ID)
 	if channelID == "" {
 		return nil
 	}
-	s.RTM.SendMessage(s.RTM.NewTypingMessage(channelID))
+	rtm := s.RTM
+	if rtm == nil {
+		return bridgev2.ErrNotLoggedIn
+	}
+	if !rtm.TrySendMessage(rtm.NewTypingMessage(channelID)) {
+		return errors.New("RTM outgoing queue is full")
+	}
 	return nil
 }
 
@@ -279,7 +421,7 @@ func (s *SlackClient) HandleMatrixRoomName(ctx context.Context, msg *bridgev2.Ma
 	}
 	resp, err := s.Client.RenameConversationContext(ctx, channelID, strings.TrimPrefix(msg.Content.Name, "#"))
 	zerolog.Ctx(ctx).Trace().Any("resp_data", resp).Msg("Renamed conversation")
-	return err == nil, err
+	return err == nil, wrapSlackMatrixError(err)
 }
 
 func (s *SlackClient) HandleMatrixMembership(ctx context.Context, msg *bridgev2.MatrixMembershipChange) (*bridgev2.MatrixMembershipResult, error) {
@@ -316,19 +458,19 @@ func (s *SlackClient) HandleMatrixMembership(ctx context.Context, msg *bridgev2.
 	case bridgev2.Invite:
 		_, err := s.Client.InviteUsersToConversationContext(ctx, channelID, targetUserID)
 		if err != nil {
-			return nil, fmt.Errorf("failed to invite user to channel: %w", err)
+			return nil, wrapSlackMatrixError(fmt.Errorf("failed to invite user to channel: %w", err))
 		}
 		log.Debug().Str("target_user_id", targetUserID).Msg("Invited user to Slack channel")
 	case bridgev2.Leave:
 		_, err := s.Client.LeaveConversationContext(ctx, channelID)
 		if err != nil {
-			return nil, fmt.Errorf("failed to leave channel: %w", err)
+			return nil, wrapSlackMatrixError(fmt.Errorf("failed to leave channel: %w", err))
 		}
 		log.Debug().Msg("Left Slack channel")
 	case bridgev2.Kick:
 		err := s.Client.KickUserFromConversationContext(ctx, channelID, targetUserID)
 		if err != nil {
-			return nil, fmt.Errorf("failed to kick user from channel: %w", err)
+			return nil, wrapSlackMatrixError(fmt.Errorf("failed to kick user from channel: %w", err))
 		}
 		log.Debug().Str("target_user_id", targetUserID).Msg("Kicked user from Slack channel")
 	default:
@@ -344,5 +486,5 @@ func (s *SlackClient) HandleMatrixRoomTopic(ctx context.Context, msg *bridgev2.M
 	}
 	resp, err := s.Client.SetTopicOfConversationContext(ctx, channelID, msg.Content.Topic)
 	zerolog.Ctx(ctx).Trace().Any("resp_data", resp).Msg("Changed conversation topic")
-	return err == nil, err
+	return err == nil, wrapSlackMatrixError(err)
 }

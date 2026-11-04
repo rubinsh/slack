@@ -61,6 +61,16 @@ func (s *SlackClient) HandleSlackEvent(ctx context.Context, rawEvt any) {
 		if !omitBridgeState {
 			s.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnecting})
 		}
+	case *slack.ConnectionErrorEvent:
+		cli := s.Client
+		if cli == nil || ctx.Err() != nil {
+			break
+		}
+		err := evt.ErrorObj
+		if _, authErr := cli.AuthTestContext(ctx); authErr != nil {
+			err = fmt.Errorf("%w (auth check: %w)", err, authErr)
+		}
+		s.handleConnectError(ctx, err)
 	case *slack.ConnectedEvent:
 		log.Debug().Msg("Connected to websocket, waiting for hello event")
 	case *slack.DisconnectedEvent:
@@ -87,8 +97,15 @@ func (s *SlackClient) HandleSlackEvent(ctx context.Context, rawEvt any) {
 			Int("error_code", evt.Error.Code).
 			Msg("Got RTM error")
 	case *slack.HelloEvent:
-		log.Debug().Msg("Received hello event from websocket (now really connected)")
+		reconnected := s.rtmHelloReceived.Swap(true)
+		log.Debug().
+			Bool("reconnected", reconnected).
+			Bool("resume", evt.Resume).
+			Msg("Received hello event from websocket (now really connected)")
 		s.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
+		if reconnected && !evt.Resume {
+			go s.catchUpAfterReconnect(ctx)
+		}
 	case *slack.InvalidAuthEvent:
 		s.invalidateSession(ctx, status.BridgeState{
 			StateEvent: status.StateBadCredentials,
@@ -100,8 +117,8 @@ func (s *SlackClient) HandleSlackEvent(ctx context.Context, rawEvt any) {
 		log.Err(evt).Msg("Got RTM error")
 		s.UserLogin.BridgeState.Send(status.BridgeState{
 			StateEvent: status.StateUnknownError,
-			Error:      status.BridgeStateErrorCode(fmt.Sprintf("slack-rtm-error-%d", evt.Code)),
-			Message:    fmt.Sprintf("%d: %s", evt.Code, evt.Msg),
+			Error:      "slack-rtm-error",
+			Info:       map[string]any{"go_error": evt.Error()},
 		})
 	case *slack.MessageEvent, *slack.ReactionAddedEvent, *slack.ReactionRemovedEvent,
 		*slack.UserTypingEvent, *slack.ChannelMarkedEvent, *slack.IMMarkedEvent, *slack.GroupMarkedEvent,

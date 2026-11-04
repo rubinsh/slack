@@ -2,12 +2,14 @@ package matrix
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/bridgeconfig"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/id"
 )
@@ -63,10 +65,14 @@ func newOwnedTestLogin(prov *ProvisioningAPI, loginID string, owner id.UserID) *
 
 func provRequest(method, target string, as id.UserID, pathValues map[string]string, body string) *http.Request {
 	r := httptest.NewRequest(method, target, strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	r.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader(body)), nil
+	}
 	for k, v := range pathValues {
 		r.SetPathValue(k, v)
 	}
-	user := &bridgev2.User{User: &database.User{MXID: as}}
+	user := &bridgev2.User{User: &database.User{MXID: as}, Permissions: bridgeconfig.PermissionLevelUser}
 	return r.WithContext(context.WithValue(r.Context(), provisioningUserKey, user))
 }
 

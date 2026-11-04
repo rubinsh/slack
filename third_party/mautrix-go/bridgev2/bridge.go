@@ -23,6 +23,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/status"
+	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 )
 
@@ -97,7 +98,7 @@ func NewBridge(
 	}
 	br.Commands = newCommandProcessor(br)
 	br.Matrix.Init(br)
-	br.Bot = br.Matrix.BotIntent()
+	br.Bot = br.Matrix.(botIntentGetter).BotIntent()
 	br.Network.Init(br)
 	br.DisappearLoop = &DisappearLoop{br: br}
 	return br
@@ -331,6 +332,11 @@ func (br *Bridge) MigrateToSplitPortals(ctx context.Context) (bool, func(), erro
 		return false, nil, fmt.Errorf("failed to fix parent portals: %w", err)
 	}
 	log.Info().Int64("rows_affected", affected2).Msg("Updated parent receivers after split portal migration")
+	staleSpaceChildren, err := br.DB.UserPortal.GetNonReceiverSpaceChildren(ctx)
+	if err != nil {
+		log.Err(err).Msg("Failed to get spaces of non-receiver logins after split portal migration")
+		return false, nil, fmt.Errorf("failed to get spaces of non-receiver logins: %w", err)
+	}
 	affected3, err := br.DB.UserPortal.DeleteNonReceiverAfterSplitPortalMigration(ctx)
 	if err != nil {
 		log.Err(err).Msg("Failed to delete user portals of non-receiver logins after split portal migration")
@@ -373,6 +379,18 @@ func (br *Bridge) MigrateToSplitPortals(ctx context.Context) (bool, func(), erro
 			}
 		}
 		log.Info().Int("room_count", len(roomsToDelete)).Msg("Finished deleting rooms that failed to migrate")
+		for _, sc := range staleSpaceChildren {
+			_, err = br.Bot.SendState(ctx, sc.SpaceRoom, event.StateSpaceChild, sc.ChildRoom.String(), &event.Content{
+				Parsed: &event.SpaceChildEventContent{},
+			}, time.Now())
+			if err != nil {
+				log.Err(err).
+					Stringer("space_room_id", sc.SpaceRoom).
+					Stringer("portal_mxid", sc.ChildRoom).
+					Msg("Failed to remove portal from space of non-receiver login")
+			}
+		}
+		log.Info().Int("portal_count", len(staleSpaceChildren)).Msg("Finished removing portals from spaces of non-receiver logins")
 	}, nil
 }
 
@@ -419,6 +437,15 @@ func (br *Bridge) StartLoginsForUsers(ctx context.Context, users []*User) {
 	}
 
 	br.Log.Info().Msg("Bridge started")
+}
+
+func (br *Bridge) GenerateContentURI(ctx context.Context, roomID id.RoomID, mediaID networkid.MediaID) (id.ContentURIString, *event.EncryptedFileInfo, error) {
+	edm, ok := br.Matrix.(MatrixConnectorWithEncryptedDirectMedia)
+	if ok {
+		return edm.GenerateContentURIWithCrypto(ctx, roomID, mediaID)
+	}
+	mxc, err := br.Matrix.GenerateContentURI(ctx, mediaID)
+	return mxc, nil, err
 }
 
 func (br *Bridge) ResetNetworkConnections() {

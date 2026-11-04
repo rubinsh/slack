@@ -55,6 +55,9 @@ func (s *SlackClient) fetchChatInfoWithCache(ctx context.Context, channelID stri
 	if cached, ok := s.chatInfoCache[channelID]; ok && time.Since(cached.ts) < ChatInfoCacheExpiry {
 		return cached.data, nil
 	} else if onlyIfNotAttempted && s.chatInfoFetchAttempted[channelID] {
+		if ok {
+			return cached.data, nil
+		}
 		return nil, fmt.Errorf("chat info fetch already attempted for channel %s", channelID)
 	}
 	zerolog.Ctx(ctx).Debug().Str("channel_id", channelID).Msg("Fetching channel info")
@@ -85,7 +88,25 @@ func (s *SlackClient) GetChannelInfoForMention(ctx context.Context, channelID st
 		return "", nil, fmt.Errorf("failed to get portal for channel %s: %w", channelID, err)
 	}
 	//portal.UpdateInfo(ctx, s.wrapChatInfo(ctx, info, false), s.UserLogin, nil, time.Time{})
-	return s.formatChannelName(info), portal, nil
+	switch {
+	case info.IsMpIM && (info.Properties == nil || !info.Properties.HasCustomMpdmName):
+		name, err := s.generateGroupDMName(ctx, info.Members)
+		return name, portal, err
+	case info.IsIM:
+		ghost, err := s.UserLogin.Bridge.GetGhostByID(ctx, slackid.MakeUserID(s.TeamID, info.User))
+		if err != nil {
+			return "", portal, err
+		}
+		ghost.UpdateInfoIfNecessary(ctx, s.UserLogin, bridgev2.RemoteEventUnknown)
+		if info.User != s.UserID {
+			return ghost.Name, portal, nil
+		}
+		selfChat := *info
+		selfChat.Name = ghost.Name
+		return s.formatChannelName(&selfChat), portal, nil
+	default:
+		return s.formatChannelName(info), portal, nil
+	}
 }
 
 const userGroupInfoCacheExpiry = 8 * time.Hour
@@ -245,9 +266,11 @@ func (s *SlackClient) wrapChatInfo(ctx context.Context, info *slack.Channel, isN
 			evtSender := s.makeEventSender(member)
 			members.MemberMap[evtSender.Sender] = bridgev2.ChatMember{EventSender: evtSender}
 		}
-		info.Name, err = s.generateGroupDMName(ctx, info.Members)
-		if err != nil {
-			return nil, err
+		if info.Properties == nil || !info.Properties.HasCustomMpdmName {
+			info.Name, err = s.generateGroupDMName(ctx, info.Members)
+			if err != nil {
+				return nil, err
+			}
 		}
 	case info.IsIM:
 		roomType = database.RoomTypeDM
@@ -346,6 +369,17 @@ func (s *SlackClient) selfPowerLevel(info *slack.Channel) int {
 	return 0
 }
 
+func (s *SlackClient) displayRealNames() bool {
+	switch s.BootResp.Prefs.DisplayRealNamesOverride {
+	case 1:
+		return true
+	case -1:
+		return false
+	default:
+		return s.BootResp.Team.Prefs.DisplayRealNames
+	}
+}
+
 func (s *SlackClient) formatChannelName(info *slack.Channel) string {
 	return s.Main.Config.FormatChannelName(&ChannelNameParams{
 		Channel:      info,
@@ -374,7 +408,7 @@ func (s *SlackClient) getTeamInfo() *bridgev2.ChatInfo {
 	return &bridgev2.ChatInfo{
 		Name:   &name,
 		Topic:  nil,
-		Avatar: makeAvatar(avatarURL, ""),
+		Avatar: s.makeAvatar(avatarURL, ""),
 		Members: &bridgev2.ChatMemberList{
 			IsFull:           false,
 			TotalMemberCount: 0,
@@ -413,7 +447,7 @@ func (s *SlackClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) 
 	}
 }
 
-func makeAvatar(avatarURL, slackAvatarHash string) *bridgev2.Avatar {
+func (s *SlackClient) makeAvatar(avatarURL, slackAvatarHash string) *bridgev2.Avatar {
 	avatarID := networkid.AvatarID(slackAvatarHash)
 	if avatarID == "" {
 		avatarID = networkid.AvatarID(avatarURL)
@@ -421,7 +455,7 @@ func makeAvatar(avatarURL, slackAvatarHash string) *bridgev2.Avatar {
 	return &bridgev2.Avatar{
 		ID: avatarID,
 		Get: func(ctx context.Context) ([]byte, error) {
-			return downloadPlainFile(ctx, avatarURL, "avatar")
+			return s.Main.downloadPlainFile(ctx, avatarURL, "avatar")
 		},
 		Remove: avatarURL == "",
 	}
@@ -435,8 +469,9 @@ func (s *SlackClient) wrapUserInfo(userID string, info *slack.User, botInfo *sla
 	var ep database.ExtraProfile
 	if info != nil {
 		name = ptr.Ptr(s.Main.Config.FormatDisplayname(&DisplaynameParams{
-			User: info,
-			Team: &s.BootResp.Team.TeamInfo,
+			User:             info,
+			Team:             &s.BootResp.Team.TeamInfo,
+			DisplayRealNames: s.displayRealNames(),
 		}))
 		avatarURL := info.Profile.ImageOriginal
 		if avatarURL == "" && info.Profile.Image512 != "" {
@@ -454,7 +489,7 @@ func (s *SlackClient) wrapUserInfo(userID string, info *slack.User, botInfo *sla
 		if teamID != s.TeamID && avatarID != "" {
 			avatarID = teamID + "-" + avatarID
 		}
-		avatar = makeAvatar(avatarURL, avatarID)
+		avatar = s.makeAvatar(avatarURL, avatarID)
 		// Optimization to avoid updating legacy avatars
 		oldAvatarID := string(ghost.AvatarID)
 		if strings.HasPrefix(oldAvatarID, "https://") && (oldAvatarID == avatarURL || strings.Contains(oldAvatarID, info.Profile.AvatarHash)) {
@@ -467,7 +502,7 @@ func (s *SlackClient) wrapUserInfo(userID string, info *slack.User, botInfo *sla
 		isBot = isBot || info.IsBot || info.IsAppUser
 	} else if botInfo != nil {
 		name = ptr.Ptr(s.Main.Config.FormatBotDisplayname(botInfo, &s.BootResp.Team.TeamInfo))
-		avatar = makeAvatar(botInfo.Icons.Image72, botInfo.Icons.Image72)
+		avatar = s.makeAvatar(botInfo.Icons.Image72, botInfo.Icons.Image72)
 		isBot = true
 	}
 	return &bridgev2.UserInfo{
@@ -539,6 +574,17 @@ func (s *SlackClient) fetchUserInfo(ctx context.Context, userID string, lastUpda
 		botInfo, err = s.Client.GetBotInfoContext(ctx, slack.GetBotInfoParameters{
 			Bot: userID,
 		})
+		var slackErr slack.SlackErrorResponse
+		if errors.As(err, &slackErr) && slackErr.Err == "bot_not_found" {
+			zerolog.Ctx(ctx).Debug().Str("bot_id", userID).Msg("Bot not found, not retrying until next sync interval")
+			return &bridgev2.UserInfo{
+				IsBot: ptr.Ptr(true),
+				ExtraUpdates: func(ctx context.Context, ghost *bridgev2.Ghost) bool {
+					ghost.Metadata.(*slackid.GhostMetadata).LastSync = jsontime.UnixNow()
+					return true
+				},
+			}, nil
+		}
 	} else if s.IsRealUser {
 		var infos map[string]*slack.User
 		infos, err = s.Client.GetUsersCacheContext(ctx, s.TeamID, slack.GetCachedUsersParameters{
@@ -575,6 +621,9 @@ func (s *SlackClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*
 		return nil, nil
 	}
 	_, userID := slackid.ParseUserID(ghost.ID)
+	if userID == "" {
+		return nil, nil
+	}
 	// Don't batch-queue B-prefix bot IDs: GetUsersCacheContext is a users-only API
 	// that silently ignores them, so they must go through fetchUserInfo → GetBotInfoContext.
 	if s.IsRealUser && userID[0] != 'B' && (ghost.Name != "" || time.Since(s.initialConnect) < 1*time.Minute) {

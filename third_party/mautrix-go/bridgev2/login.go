@@ -187,7 +187,8 @@ type LoginClientHTTPParams struct {
 	Headers   http.Header `json:"headers,omitempty"`
 	Body      []byte      `json:"body,omitempty"`
 
-	Fingerprint string `json:"fingerprint,omitempty"`
+	Fingerprint         string `json:"fingerprint,omitempty"`
+	AcceptsGzipResponse bool   `json:"accepts_gzip_response,omitzero"`
 }
 
 func (lchp *LoginClientHTTPParams) MarshalZerologObject(e *zerolog.Event) {
@@ -196,8 +197,11 @@ func (lchp *LoginClientHTTPParams) MarshalZerologObject(e *zerolog.Event) {
 		Str("url", lchp.URL).
 		Int("header_count", len(lchp.Headers)).
 		Int("body_length", len(lchp.Body)).
-		Str("fingerprint", lchp.Fingerprint)
+		Str("fingerprint", lchp.Fingerprint).
+		Bool("accepts_gzip_response", lchp.AcceptsGzipResponse)
 }
+
+const ClientHTTPResponseGzipContentType = "application/vnd.mautrix.client-http-response+gzip"
 
 type LoginClientHTTPResponse struct {
 	StatusCode  int         `json:"status_code,omitzero"`
@@ -303,9 +307,10 @@ type LoginCookiesParams struct {
 	// even if this URL is not reached, but it should only automatically close the webview after
 	// both cookies and the URL match.
 	WaitForURLPattern string `json:"wait_for_url_pattern,omitempty"`
-	// If set, the client should load the URL and run ExtractJS in a webview that is not shown to the
-	// user.
+	// If true, the client should load the URL and run ExtractJS in a webview that is not shown to the user.
 	Hidden bool `json:"hidden,omitzero"`
+	// If true, running ExtractJS is mandatory. Clients that are unable to do so should fail the login.
+	JSRequired bool `json:"js_required,omitzero"`
 }
 
 func (lcp *LoginCookiesParams) MarshalZerologObject(e *zerolog.Event) {

@@ -23,6 +23,10 @@ jobs:
           go-version: ${{ matrix.go-version }}
           cache: true
 
+      - name: Test local SDK provisioning
+        working-directory: third_party/mautrix-go
+        run: go test -tags goolm ./bridgev2/matrix
+
       - name: Install libolm
         run: sudo apt-get install libolm-dev libolm3
 

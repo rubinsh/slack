@@ -7,6 +7,7 @@
 package appservice
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -176,9 +178,11 @@ type AppService struct {
 	Ready bool
 
 	clients     map[id.UserID]*mautrix.Client
-	clientsLock sync.RWMutex
 	intents     map[id.UserID]*IntentAPI
 	intentsLock sync.RWMutex
+
+	lastCacheEvict  time.Time
+	IntentCacheSize int
 
 	ws                    *websocket.Conn
 	StopWebsocket         func(error)
@@ -293,8 +297,15 @@ func (as *AppService) makeIntent(userID id.UserID) *IntentAPI {
 		}
 		return nil
 	}
-	intent = as.NewIntentAPI(localpart)
+	if as.IntentCacheSize > 0 && len(as.intents) >= as.IntentCacheSize && time.Since(as.lastCacheEvict) > 5*time.Minute {
+		as.evictIntentCache()
+		as.lastCacheEvict = time.Now()
+	}
+	intent = as.newIntentAPIUnlocked(userID)
 	as.intents[userID] = intent
+	if as.IntentCacheSize > 0 {
+		intent.Touch()
+	}
 	return intent
 }
 
@@ -396,10 +407,7 @@ func (as *AppService) NewExternalMautrixClient(userID id.UserID, token string, h
 	return client, nil
 }
 
-func (as *AppService) makeClient(userID id.UserID) *mautrix.Client {
-	as.clientsLock.Lock()
-	defer as.clientsLock.Unlock()
-
+func (as *AppService) makeClientUnlocked(userID id.UserID) *mautrix.Client {
 	client, ok := as.clients[userID]
 	if !ok {
 		client = as.NewMautrixClient(userID)
@@ -413,15 +421,19 @@ func (as *AppService) makeClient(userID id.UserID) *mautrix.Client {
 // Unlike [AppService.Intent], this does not do any validation, and will always return a value.
 // Usually you should prefer creating intents and using intent methods over direct client methods.
 // You can always access the client inside an intent with [IntentAPI.Client].
+//
+// Deprecated: Use Intent instead.
 func (as *AppService) Client(userID id.UserID) *mautrix.Client {
 	if userID == as.BotMXID() {
 		return as.BotClient()
 	}
-	as.clientsLock.RLock()
+	as.intentsLock.RLock()
 	client, ok := as.clients[userID]
-	as.clientsLock.RUnlock()
+	as.intentsLock.RUnlock()
 	if !ok {
-		return as.makeClient(userID)
+		as.intentsLock.Lock()
+		defer as.intentsLock.Unlock()
+		return as.makeClientUnlocked(userID)
 	}
 	return client
 }
@@ -431,7 +443,48 @@ func (as *AppService) Client(userID id.UserID) *mautrix.Client {
 // Like with the generic Client method, [AppService.BotIntent] should be preferred over this.
 func (as *AppService) BotClient() *mautrix.Client {
 	if as.botClient == nil {
-		as.botClient = as.makeClient(as.BotMXID())
+		as.intentsLock.Lock()
+		defer as.intentsLock.Unlock()
+		return as.botClientUnlocked()
 	}
 	return as.botClient
+}
+
+func (as *AppService) botClientUnlocked() *mautrix.Client {
+	if as.botClient == nil {
+		as.botClient = as.makeClientUnlocked(as.BotMXID())
+	}
+	return as.botClient
+}
+
+type cacheItem struct {
+	touchedAt uint32
+	key       id.UserID
+}
+
+func (as *AppService) evictIntentCache() {
+	items := make([]cacheItem, 0, len(as.intents))
+	for key, intent := range as.intents {
+		if intent == as.botIntent {
+			continue
+		}
+		items = append(items, cacheItem{
+			touchedAt: intent.lastUsed.Load(),
+			key:       key,
+		})
+	}
+	slices.SortFunc(items, func(a, b cacheItem) int {
+		return cmp.Compare(a.touchedAt, b.touchedAt)
+	})
+	cutoff := len(items) - (as.IntentCacheSize / 4)
+	if cutoff > 0 {
+		for _, item := range items[:cutoff] {
+			delete(as.intents, item.key)
+			delete(as.clients, item.key)
+		}
+	}
+	as.Log.Debug().
+		Time("last_evict", as.lastCacheEvict).
+		Int("removed_count", cutoff).
+		Msg("Evicted intent cache")
 }

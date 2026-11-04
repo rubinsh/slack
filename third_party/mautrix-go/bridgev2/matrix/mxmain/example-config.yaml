@@ -289,6 +289,9 @@ matrix:
     # Should the bridge set additional custom profile info for ghosts?
     # This can make a lot of requests, as there's no batch profile update endpoint.
     ghost_extra_profile_info: false
+    # Maximum file download size in bytes. By default (-1), the bridge will only download 100 MiB files in-memory
+    # and 2 GiB files when streaming via disk. This can be set to a value higher than zero to change both limits.
+    max_download_size: -1
 
 # Segment-compatible analytics endpoint for tracking some events, like provisioning API login and encryption errors.
 analytics:
@@ -349,6 +352,9 @@ public_media:
 direct_media:
     # Should custom mxc:// URIs be used instead of reuploading media?
     enabled: false
+    # Should direct media be encrypted when sending to encrypted rooms?
+    # This uses non-standard encryption (FLOE) instead of the standard AES-CTR, so it won't work in most clients.
+    encrypted: false
     # The server name to use for the custom mxc:// URIs.
     # This server name will effectively be a real Matrix server, it just won't implement anything other than media.
     # You must either set up .well-known delegation from this domain to the bridge, or proxy the domain directly to the bridge.
@@ -512,6 +518,11 @@ encryption:
 #
 # e.g. if the prefix is set to `BRIDGE_`, then `BRIDGE_APPSERVICE__AS_TOKEN` will set appservice.as_token.
 # `BRIDGE_appservice.as_token` would work as well, but can't be set in a shell as easily.
+#
+# Only primitive fields can be changed (strings, booleans and numbers). Array fields and maps of objects
+# can't be set using environment variables at all currently, but maps of primitives can be set by just
+# having the map key as the last item. If the map key contains dots, just replace them with __ like the
+# nesting dots, e.g. `BRIDGE_DOUBLE_PUPPET__SECRETS__EXAMPLE__COM`
 #
 # The variable names can also have a `_FILE` suffix to tell the bridge to read the value from the
 # path set in the variable rather than using the value directly.

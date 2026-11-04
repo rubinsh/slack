@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/rs/zerolog"
 
@@ -23,10 +25,11 @@ import (
 
 type IntentAPI struct {
 	*mautrix.Client
-	bot       *mautrix.Client
-	as        *AppService
-	Localpart string
-	UserID    id.UserID
+	bot    *mautrix.Client
+	as     *AppService
+	UserID id.UserID
+
+	lastUsed atomic.Uint32
 
 	registerLock sync.Mutex
 
@@ -34,26 +37,48 @@ type IntentAPI struct {
 	Registered     bool
 }
 
+// Deprecated: Intents should not be created manually
 func (as *AppService) NewIntentAPI(localpart string) *IntentAPI {
-	userID := id.NewUserID(localpart, as.HomeserverDomain)
-	bot := as.BotClient()
+	as.intentsLock.Lock()
+	defer as.intentsLock.Unlock()
+	return as.newIntentAPIUnlocked(id.NewUserID(localpart, as.HomeserverDomain))
+}
+
+func (as *AppService) NewDoublePuppetIntent(userID id.UserID, client *mautrix.Client) *IntentAPI {
+	return &IntentAPI{
+		Client: client,
+		bot:    as.BotClient(),
+		as:     as,
+		UserID: userID,
+
+		IsCustomPuppet: true,
+	}
+}
+
+func (as *AppService) newIntentAPIUnlocked(userID id.UserID) *IntentAPI {
+	bot := as.botClientUnlocked()
 	if userID == bot.UserID {
 		bot = nil
 	}
 	return &IntentAPI{
-		Client:    as.Client(userID),
-		bot:       bot,
-		as:        as,
-		Localpart: localpart,
-		UserID:    userID,
+		Client: as.makeClientUnlocked(userID),
+		bot:    bot,
+		as:     as,
+		UserID: userID,
 
 		IsCustomPuppet: false,
 	}
 }
 
+var cacheStart = time.Now()
+
+func (intent *IntentAPI) Touch() {
+	intent.lastUsed.Store(uint32(time.Since(cacheStart) / 1e9))
+}
+
 func (intent *IntentAPI) Register(ctx context.Context) error {
 	_, err := intent.Client.MakeRequest(ctx, http.MethodPost, intent.BuildClientURL("v3", "register"), &mautrix.ReqRegister[any]{
-		Username:     intent.Localpart,
+		Username:     intent.UserID.Localpart(),
 		Type:         mautrix.AuthTypeAppservice,
 		InhibitLogin: true,
 	}, nil)

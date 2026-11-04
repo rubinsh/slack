@@ -85,6 +85,8 @@ type Connector struct {
 	specCapsLock            sync.Mutex
 	Capabilities            *bridgev2.MatrixCapabilities
 	IgnoreUnsupportedServer bool
+	MaxDownloadSize         int64
+	MaxMemoryDownloadSize   int64
 
 	EventProcessor *appservice.EventProcessor
 
@@ -117,6 +119,12 @@ func NewConnector(cfg *bridgeconfig.Config) *Connector {
 	c.Config = cfg
 	c.userIDRegex = cfg.MakeUserIDRegex("(.+)")
 	c.MediaConfig.UploadSize = 50 * 1024 * 1024
+	c.MaxDownloadSize = 2 * 1024 * 1024 * 1024
+	c.MaxMemoryDownloadSize = 100 * 1024 * 1024
+	if cfg.Matrix.MaxDownloadSize > 0 {
+		c.MaxDownloadSize = cfg.Matrix.MaxDownloadSize
+		c.MaxMemoryDownloadSize = cfg.Matrix.MaxDownloadSize
+	}
 	c.uploadSema = semaphore.NewWeighted(c.MediaConfig.UploadSize + 1)
 	c.Capabilities = &bridgev2.MatrixCapabilities{}
 	c.doublePuppetIntents = exsync.NewMap[id.UserID, *appservice.IntentAPI]()
@@ -128,6 +136,7 @@ func (br *Connector) Init(bridge *bridgev2.Bridge) {
 	br.Log = &bridge.Log
 	br.StateStore = sqlstatestore.NewSQLStateStore(bridge.DB.Database, dbutil.ZeroLogger(br.Log.With().Str("db_section", "matrix_state").Logger()), false)
 	br.AS = br.Config.MakeAppService()
+	br.AS.IntentCacheSize = 2048
 	br.AS.Log = bridge.Log
 	br.AS.StateStore = br.StateStore
 	br.EventProcessor = appservice.NewEventProcessor(br.AS)
@@ -508,10 +517,7 @@ func (br *Connector) UpdateBotProfile(ctx context.Context) {
 }
 
 func (br *Connector) GhostIntent(userID networkid.UserID) bridgev2.MatrixAPI {
-	return &ASIntent{
-		Matrix:    br.AS.Intent(br.FormatGhostMXID(userID)),
-		Connector: br,
-	}
+	return br.newASIntent(br.FormatGhostMXID(userID), br.AS.Intent)
 }
 
 func (br *Connector) SendBridgeStatus(ctx context.Context, state *status.BridgeState) error {
@@ -634,11 +640,23 @@ func (br *Connector) NewUserIntent(ctx context.Context, userID id.UserID, access
 		return nil, accessToken, err
 	}
 	br.doublePuppetIntents.Set(userID, intent)
-	return &ASIntent{Connector: br, Matrix: intent}, newToken, nil
+	return br.newASIntent(userID, br.getDoublePuppetIntent), newToken, nil
+}
+
+func (br *Connector) getDoublePuppetIntent(userID id.UserID) *appservice.IntentAPI {
+	intent, _ := br.doublePuppetIntents.Get(userID)
+	return intent
 }
 
 func (br *Connector) BotIntent() bridgev2.MatrixAPI {
-	return &ASIntent{Connector: br, Matrix: br.Bot}
+	return br.newASIntent(br.Bot.UserID, br.getBotIntent)
+}
+
+func (br *Connector) getBotIntent(userID id.UserID) *appservice.IntentAPI {
+	if userID != br.Bot.UserID {
+		panic("getBotIntent called with non-bot user ID")
+	}
+	return br.Bot
 }
 
 func (br *Connector) GetPowerLevels(ctx context.Context, roomID id.RoomID) (*event.PowerLevelsEventContent, error) {

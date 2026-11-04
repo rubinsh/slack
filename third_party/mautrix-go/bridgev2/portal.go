@@ -86,6 +86,8 @@ type Portal struct {
 	currentlyTypingLogins map[id.UserID]*UserLogin
 	currentlyTypingLock   sync.Mutex
 	currentlyTypingGhosts *exsync.Set[id.UserID]
+	typingUpdaterRunning  bool
+	lastMatrixTyping      time.Time
 
 	outgoingMessages     map[networkid.TransactionID]*outgoingMessage
 	outgoingMessagesLock sync.Mutex
@@ -100,7 +102,8 @@ type Portal struct {
 	functionalMembersLock  sync.Mutex
 	functionalMembersCache *event.ElementFunctionalMembersContent
 
-	events chan portalEvent
+	events         chan portalEvent
+	eventsSendLock sync.RWMutex
 
 	eventsLock sync.Mutex
 	eventIdx   int
@@ -366,6 +369,11 @@ func (portal *Portal) queueEvent(ctx context.Context, evt portalEvent) EventHand
 	} else {
 		if portal.events == nil {
 			panic(fmt.Errorf("queueEvent into uninitialized portal %s", portal.PortalKey))
+		}
+		portal.eventsSendLock.RLock()
+		defer portal.eventsSendLock.RUnlock()
+		if portal.backgroundCtx.Err() != nil {
+			return EventHandlingResultIgnored
 		}
 		select {
 		case portal.events <- evt:
@@ -969,13 +977,12 @@ func (portal *Portal) handleMatrixReceipts(ctx context.Context, evt *event.Event
 }
 
 func (portal *Portal) handleMatrixReadReceipt(ctx context.Context, user *User, eventID id.EventID, receipt event.ReadReceipt) {
-	log := zerolog.Ctx(ctx)
-	log.UpdateContext(func(c zerolog.Context) zerolog.Context {
-		return c.
-			Stringer("event_id", eventID).
-			Stringer("user_id", user.MXID).
-			Stringer("receipt_ts", receipt.Timestamp)
-	})
+	log := zerolog.Ctx(ctx).With().
+		Stringer("event_id", eventID).
+		Stringer("user_id", user.MXID).
+		Stringer("receipt_ts", receipt.Timestamp).
+		Stringer("thread_id", receipt.ThreadID).
+		Logger()
 	login, userPortal, err := portal.FindPreferredLogin(ctx, user, false)
 	if err != nil {
 		if !errors.Is(err, ErrNotLoggedIn) {
@@ -1084,6 +1091,11 @@ func (portal *Portal) handleMatrixTyping(ctx context.Context, evt *event.Event) 
 	portal.sendTypings(ctx, stoppedTyping, false)
 	portal.sendTypings(ctx, startedTyping, true)
 	portal.currentlyTyping = content.UserIDs
+	portal.lastMatrixTyping = time.Now()
+	if len(portal.currentlyTypingLogins) > 0 && !portal.typingUpdaterRunning && portal.Bridge.Network.GetCapabilities().TypingRepeatInterval > 0 {
+		portal.typingUpdaterRunning = true
+		go portal.periodicTypingUpdater()
+	}
 	// TODO actual status
 	return EventHandlingResultSuccess
 }
@@ -1137,17 +1149,27 @@ func (portal *Portal) sendTypings(ctx context.Context, userIDs []id.UserID, typi
 	}
 }
 
+const typingRepeatTimeout = 5 * time.Minute
+
 func (portal *Portal) periodicTypingUpdater() {
-	// TODO actually call this function
 	log := portal.Log.With().Str("component", "typing updater").Logger()
-	ctx := log.WithContext(context.Background())
+	ctx := log.WithContext(portal.backgroundCtx)
+	ticker := time.NewTicker(portal.Bridge.Network.GetCapabilities().TypingRepeatInterval)
+	defer ticker.Stop()
 	for {
-		// TODO make delay configurable by network connector
-		time.Sleep(5 * time.Second)
-		portal.currentlyTypingLock.Lock()
-		if len(portal.currentlyTyping) == 0 {
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			portal.currentlyTypingLock.Lock()
+			portal.typingUpdaterRunning = false
 			portal.currentlyTypingLock.Unlock()
-			continue
+			return
+		}
+		portal.currentlyTypingLock.Lock()
+		if len(portal.currentlyTypingLogins) == 0 || time.Since(portal.lastMatrixTyping) > typingRepeatTimeout {
+			portal.typingUpdaterRunning = false
+			portal.currentlyTypingLock.Unlock()
+			return
 		}
 		for _, userID := range portal.currentlyTyping {
 			login, ok := portal.currentlyTypingLogins[userID]
@@ -1548,7 +1570,7 @@ func (evt *MatrixMessage) fillDBMessage(message *database.Message) *database.Mes
 	if message.SenderMXID == "" {
 		message.SenderMXID = evt.Event.Sender
 	}
-	if message.SendTxnID != "" {
+	if message.SendTxnID == "" {
 		message.SendTxnID = evt.InputTransactionID
 	}
 	return message
@@ -2889,10 +2911,12 @@ func (portal *Portal) GetIntentFor(ctx context.Context, sender EventSender, sour
 	if err != nil {
 		return nil, false
 	}
-	if intent == nil {
+	if sender.Sender == "" {
 		// TODO this is very hacky - we should either insert an empty ghost row automatically
 		//      (and not fetch it at runtime) or make the message sender column nullable.
 		portal.Bridge.GetGhostByID(ctx, "")
+	}
+	if intent == nil {
 		intent = portal.Bridge.Bot
 		if intent == nil {
 			panic(fmt.Errorf("bridge bot is nil"))
@@ -3855,7 +3879,7 @@ func (portal *Portal) handleRemoteMessageRemove(ctx context.Context, source *Use
 	if !ok {
 		return EventHandlingResultFailed.WithError(ErrFailedToGetIntent)
 	}
-	if intent == portal.Bridge.Bot && len(targetParts) > 0 {
+	if intent == portal.Bridge.Bot && len(targetParts) > 0 && !onlyForMe {
 		senderIntent, err := portal.getIntentForMXID(ctx, targetParts[0].SenderMXID)
 		if err != nil {
 			log.Err(err).Stringer("sender_mxid", targetParts[0].SenderMXID).Msg("Failed to get intent for removing message")
@@ -3950,8 +3974,16 @@ func (portal *Portal) handleRemoteReadReceipt(ctx context.Context, source *UserL
 			}
 		}
 	}
+	var threadRootID networkid.MessageID
+	if threadProvider, ok := evt.(RemoteReadReceiptWithThread); ok {
+		threadRootID = threadProvider.GetReceiptThread()
+	}
 	if lastTarget == nil && !readUpTo.IsZero() {
-		lastTarget, err = portal.Bridge.DB.Message.GetLastNonFakePartAtOrBeforeTime(ctx, portal.PortalKey, readUpTo)
+		if threadRootID != "" {
+			lastTarget, err = portal.Bridge.DB.Message.GetLastNonFakePartAtOrBeforeTimeInThread(ctx, portal.PortalKey, threadRootID, readUpTo)
+		} else {
+			lastTarget, err = portal.Bridge.DB.Message.GetLastNonFakePartAtOrBeforeTime(ctx, portal.PortalKey, readUpTo)
+		}
 		if err != nil {
 			log.Err(err).Time("read_up_to", readUpTo).Msg("Failed to get target message for read receipt")
 		}
@@ -3960,6 +3992,29 @@ func (portal *Portal) handleRemoteReadReceipt(ctx context.Context, source *UserL
 	intent, ok := portal.GetIntentFor(ctx, sender, source, RemoteEventReadReceipt)
 	if !ok {
 		return EventHandlingResultFailed.WithError(ErrFailedToGetIntent)
+	}
+	var threadRoot *database.Message
+	var threadReadingIntent ThreadReadingMatrixAPI
+	if threadRootID != "" {
+		threadRoot, err = portal.Bridge.DB.Message.GetFirstThreadMessage(ctx, portal.PortalKey, threadRootID)
+		if err != nil {
+			log.Err(err).
+				Str("thread_root_id", string(threadRootID)).
+				Msg("Failed to get thread root message for read receipt")
+			return EventHandlingResultFailed.WithError(err)
+		} else if threadRoot == nil {
+			log.Debug().
+				Str("thread_root_id", string(threadRootID)).
+				Msg("Thread root message not found")
+		} else if threadRoot.HasFakeMXID() {
+			log.Debug().
+				Str("thread_root_id", string(threadRootID)).
+				Msg("Thread root message is fake")
+			threadRoot = nil
+		}
+		if threadRoot != nil {
+			threadReadingIntent, _ = intent.(ThreadReadingMatrixAPI)
+		}
 	}
 	var addTargetLog func(evt *zerolog.Event) *zerolog.Event
 	if lastTarget == nil {
@@ -3981,7 +4036,11 @@ func (portal *Portal) handleRemoteReadReceipt(ctx context.Context, source *UserL
 		addTargetLog = func(evt *zerolog.Event) *zerolog.Event {
 			return evt.Stringer("target_mxid", lastTarget.MXID)
 		}
-		err = intent.MarkRead(ctx, portal.MXID, lastTarget.MXID, getEventTS(evt))
+		if threadReadingIntent != nil {
+			err = threadReadingIntent.MarkThreadRead(ctx, portal.MXID, lastTarget.MXID, getEventTS(evt), threadRoot.MXID)
+		} else {
+			err = intent.MarkRead(ctx, portal.MXID, lastTarget.MXID, getEventTS(evt))
+		}
 		readUpTo = lastTarget.Timestamp
 	}
 	if err != nil {
@@ -5400,11 +5459,7 @@ func (portal *Portal) CreateMatrixRoom(ctx context.Context, source *UserLogin, i
 	if portal.Bridge.Config.PortalEventBuffer == 0 {
 		go portal.queueEvent(mergedCtx, evt)
 	} else {
-		select {
-		case portal.events <- evt:
-		case <-portal.deleted:
-			return ErrPortalIsDeleted
-		}
+		portal.queueEvent(mergedCtx, evt)
 	}
 	select {
 	case <-ctx.Done():
@@ -5782,8 +5837,9 @@ func (portal *Portal) unlockedDeleteCache() {
 	}
 	portal.cancelBackground()
 	if portal.events != nil {
-		// TODO there's a small risk of this racing with a queueEvent call
+		portal.eventsSendLock.Lock()
 		close(portal.events)
+		portal.eventsSendLock.Unlock()
 	}
 }
 
