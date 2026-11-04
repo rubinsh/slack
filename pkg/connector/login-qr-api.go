@@ -135,7 +135,7 @@ func (s *slackQRAPI) walk(ctx context.Context, link *slackQRLink, method string,
 		if challenge != nil {
 			return &slackQRResult{challenge: challenge}, nil
 		}
-		logSlackQRDiagnostic(ctx, reason, phase, status, hop+1)
+		logSlackQRDiagnostic(ctx, reason, phase, status, hop+1, s.diagnosticDetail(target, link))
 		return nil, errSlackQRBrowser
 	}
 	logSlackQRDiagnostic(ctx, qrRedirectLimit, phase, 0, slackQRMaxHops)
@@ -227,7 +227,7 @@ func (s *slackQRAPI) session(ctx context.Context, link *slackQRLink) (*slackQRRe
 		}
 		match := qrWebTokenPattern.FindSubmatch(body)
 		if match == nil {
-			logSlackQRDiagnostic(ctx, qrMissingSessionToken, qrPhaseSession, status, hop+1)
+			logSlackQRDiagnostic(ctx, qrMissingSessionToken, qrPhaseSession, status, hop+1, s.diagnosticDetail(target, link))
 			return nil, errSlackQRBrowser
 		}
 		cookie := s.cookie(link)

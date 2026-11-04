@@ -29,6 +29,13 @@ func assertQRDiagnostic(t *testing.T, buffer *bytes.Buffer, reason, phase string
 	t.Helper()
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(bytes.TrimSpace(buffer.Bytes()), &got), "expected exactly one JSON diagnostic")
+	if route, present := got["route_class"]; present {
+		assert.Contains(t, []string{"unknown", "app", "workspace", "other_slack"}, route)
+		_, isBool := got["has_d_cookie"].(bool)
+		require.True(t, isBool)
+		delete(got, "route_class")
+		delete(got, "has_d_cookie")
+	}
 	assert.Equal(t, map[string]any{
 		"level": "warn", "message": "Slack QR sign-in could not advance",
 		"qr_reason": reason, "qr_phase": phase, "http_status": float64(status), "hop": float64(hop),
@@ -222,6 +229,49 @@ func TestSlackQRDiagnosticsBoundMetadataAndIgnoreCancellation(t *testing.T) {
 	_, err := a.begin(cancelled, qrSyntheticURL)
 	require.Error(t, err)
 	assert.Empty(t, buffer.String())
+}
+
+func TestSlackQRDiagnosticsLandingMetadata(t *testing.T) {
+	cases := []struct {
+		name, route string
+		cookie      bool
+		transport   qrTestTransport
+	}{
+		{"app landing", "app", false, func(r *http.Request) (*http.Response, error) {
+			return qrResponse(r, 200, qrDiagnosticCanary), nil
+		}},
+		{"expected workspace", "workspace", false, qrDiagnosticLanding(qrDiagnosticCanary)},
+		{"other Slack host", "other_slack", false, func(r *http.Request) (*http.Response, error) {
+			if r.URL.Hostname() == "app.slack.com" {
+				return qrResponse(r, 302, "", "Location", "https://other.slack.com/"+qrDiagnosticCanary+"?code=123456"), nil
+			}
+			return qrResponse(r, 200, qrDiagnosticCanary), nil
+		}},
+		{"session with cookie", "workspace", true, qrDiagnosticSession(t, func(r *http.Request) (*http.Response, error) {
+			return qrResponse(r, 200, qrDiagnosticCanary), nil
+		})},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, buffer := qrDiagnosticContext()
+			_, err := qrTestAPI(tc.transport).begin(ctx, qrSyntheticURL)
+			require.ErrorIs(t, err, errSlackQRBrowser)
+			var got map[string]any
+			require.NoError(t, json.Unmarshal(buffer.Bytes(), &got))
+			assert.Equal(t, tc.route, got["route_class"])
+			assert.Equal(t, tc.cookie, got["has_d_cookie"])
+			assertQRDiagnostic(t, buffer, got["qr_reason"].(string), got["qr_phase"].(string), int(got["http_status"].(float64)), int(got["hop"].(float64)))
+		})
+	}
+	t.Run("unknown enum is bounded", func(t *testing.T) {
+		ctx, buffer := qrDiagnosticContext()
+		logSlackQRDiagnostic(ctx, qrUnexpectedChallengeRoute, qrPhaseBegin, 200, 1, slackQRDiagnosticDetail{route: slackQRRoute(255)})
+		var got map[string]any
+		require.NoError(t, json.Unmarshal(buffer.Bytes(), &got))
+		assert.Equal(t, "unknown", got["route_class"])
+		assert.Equal(t, false, got["has_d_cookie"])
+		assertQRDiagnostic(t, buffer, "unexpected_challenge_route", "begin", 200, 1)
+	})
 }
 
 func TestSlackQRDiagnosticsSuccessfulFlowIsSilent(t *testing.T) {

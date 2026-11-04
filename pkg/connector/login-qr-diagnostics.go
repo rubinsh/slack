@@ -3,6 +3,7 @@ package connector
 
 import (
 	"context"
+	"net/url"
 
 	"github.com/rs/zerolog"
 )
@@ -65,9 +66,47 @@ func (r slackQRReason) String() string {
 	return names[r]
 }
 
+type slackQRRoute uint8
+
+const (
+	qrRouteUnknown slackQRRoute = iota
+	qrRouteApp
+	qrRouteWorkspace
+	qrRouteOtherSlack
+)
+
+func (r slackQRRoute) String() string {
+	names := [...]string{"unknown", "app", "workspace", "other_slack"}
+	if int(r) >= len(names) {
+		return "unknown"
+	}
+	return names[r]
+}
+
+type slackQRDiagnosticDetail struct {
+	route      slackQRRoute
+	hasDCookie bool
+}
+
+func (s *slackQRAPI) diagnosticDetail(target *url.URL, link *slackQRLink) slackQRDiagnosticDetail {
+	route := qrRouteUnknown
+	if safeSlackQRURL(target) {
+		switch {
+		case target.Hostname() == "app.slack.com":
+			route = qrRouteApp
+		case link != nil && target.Hostname() == link.workspace+".slack.com":
+			route = qrRouteWorkspace
+		default:
+			route = qrRouteOtherSlack
+		}
+	}
+	return slackQRDiagnosticDetail{route: route, hasDCookie: link != nil && s.cookie(link) != ""}
+}
+
 // URL paths, response bodies and even transport errors may contain credentials.
-// This boundary accepts only fixed enums and bounded numeric metadata.
-func logSlackQRDiagnostic(ctx context.Context, reason slackQRReason, phase slackQRPhase, status, hop int) {
+// This boundary accepts only fixed enums, bounded numbers and a cookie-presence
+// bit. Optional detail is present only where the workspace and target are known.
+func logSlackQRDiagnostic(ctx context.Context, reason slackQRReason, phase slackQRPhase, status, hop int, detail ...slackQRDiagnosticDetail) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -77,10 +116,13 @@ func logSlackQRDiagnostic(ctx context.Context, reason slackQRReason, phase slack
 	if hop < 0 || hop > slackQRMaxHops {
 		hop = 0
 	}
-	zerolog.Ctx(ctx).Warn().
+	event := zerolog.Ctx(ctx).Warn().
 		Str("qr_reason", reason.String()).
 		Str("qr_phase", phase.String()).
 		Int("http_status", status).
-		Int("hop", hop).
-		Msg("Slack QR sign-in could not advance")
+		Int("hop", hop)
+	if len(detail) > 0 {
+		event = event.Str("route_class", detail[0].route.String()).Bool("has_d_cookie", detail[0].hasDCookie)
+	}
+	event.Msg("Slack QR sign-in could not advance")
 }
