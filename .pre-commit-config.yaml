@@ -17,6 +17,8 @@ repos:
           - "go.mau.fi/mautrix-slack"
           - "-w"
       - id: go-vet-repo-mod
+        args:
+          - "--hook:ignore-dir=third_party"
       - id: go-staticcheck-repo-mod
       - id: go-mod-tidy
 
