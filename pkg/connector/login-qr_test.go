@@ -91,6 +91,7 @@ func TestSlackQRRedirectCookieAndToken(t *testing.T) {
 func TestSlackQRRequiredTwoFactorAndRetry(t *testing.T) {
 	calls, posts, completed := 0, 0, 0
 	a := qrTestAPI(func(r *http.Request) (*http.Response, error) {
+		assertSlackQRRequestProfile(t, r)
 		calls++
 		if r.URL.Hostname() == "app.slack.com" {
 			return qrResponse(r, 302, "", "Location", "https://acme.slack.com"+qrSyntheticPath), nil

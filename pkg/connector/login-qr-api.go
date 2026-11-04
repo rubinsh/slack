@@ -12,20 +12,24 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/slack-go/slack"
 	"golang.org/x/net/html"
 	"golang.org/x/net/publicsuffix"
 )
 
 var (
 	errSlackQRInvalid = errors.New("invalid Slack QR link")
-	errSlackQRBrowser = errors.New("Slack requires browser verification")
+	errSlackQRBrowser = errors.New("Slack QR sign-in requires an unsupported step")
+	errSlackQRExpired = errors.New("Slack QR link expired or was already used")
+	errSlackQRDevice  = errors.New("Slack QR sign-in requires device confirmation")
 	errSlackQRFailed  = errors.New("Slack QR sign-in did not complete")
 	qrPathPattern     = regexp.MustCompile(`^/t/([a-z0-9][a-z0-9-]*)/login/(z-app-[A-Za-z0-9_-]+)$`)
 	qrWebTokenPattern = regexp.MustCompile(`"api_token"\s*:\s*"(xoxc-[a-zA-Z0-9-]+)"`)
 )
 
-const slackQRMaxHops = 10
+const (
+	slackQRMaxHops          = 10
+	slackQRBrowserUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+)
 
 type slackQRAPI struct{ client *http.Client }
 type slackQRLink struct {
@@ -135,7 +139,17 @@ func (s *slackQRAPI) walk(ctx context.Context, link *slackQRLink, method string,
 		if challenge != nil {
 			return &slackQRResult{challenge: challenge}, nil
 		}
-		logSlackQRDiagnostic(ctx, reason, phase, status, hop+1, s.diagnosticDetail(target, link))
+		detail := s.diagnosticDetail(target, link)
+		if detail.route == qrRouteWorkspace {
+			if denial := slackQRPageDenial(body); denial != qrReasonNone {
+				logSlackQRDiagnostic(ctx, denial, phase, status, hop+1, detail)
+				if denial == qrLinkExpired {
+					return nil, errSlackQRExpired
+				}
+				return nil, errSlackQRDevice
+			}
+		}
+		logSlackQRDiagnostic(ctx, reason, phase, status, hop+1, detail)
 		return nil, errSlackQRBrowser
 	}
 	logSlackQRDiagnostic(ctx, qrRedirectLimit, phase, 0, slackQRMaxHops)
@@ -256,7 +270,9 @@ func (s *slackQRAPI) request(ctx context.Context, method string, target *url.URL
 		logSlackQRDiagnostic(ctx, qrRequestBuildFailed, phase, 0, hop)
 		return nil, "", 0, errSlackQRFailed
 	}
-	req.Header.Set("User-Agent", slack.DefaultUserAgent)
+	req.Header.Set("User-Agent", slackQRBrowserUserAgent)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	if form != nil {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}

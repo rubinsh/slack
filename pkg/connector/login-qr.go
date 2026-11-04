@@ -75,11 +75,15 @@ func (s *SlackQRLogin) SubmitUserInput(parent context.Context, input map[string]
 	if err != nil {
 		s.challenge = nil
 		instructions := "Slack could not complete that sign-in. Generate a fresh QR code, or cancel and choose another sign-in method."
-		if errors.Is(err, errSlackQRInvalid) {
+		switch {
+		case errors.Is(err, errSlackQRInvalid):
 			instructions = "Enter an HTTPS Slack Sign in on mobile link, not an image address or another QR code."
-		}
-		if errors.Is(err, errSlackQRBrowser) {
-			instructions = "Slack requires an additional browser or device approval. Complete the required verification in Slack, then try a fresh QR or another sign-in method."
+		case errors.Is(err, errSlackQRExpired):
+			instructions = "This Slack QR link has expired or was already used. Generate a new QR in Slack and upload it without opening its link first."
+		case errors.Is(err, errSlackQRDevice):
+			instructions = "Slack asks you to confirm this sign-in on an already signed-in device. This QR flow cannot complete that step; cancel and choose another sign-in method."
+		case errors.Is(err, errSlackQRBrowser):
+			instructions = "This QR sign-in could not complete here. Generate a new QR code, or cancel and choose another sign-in method."
 		}
 		return slackQRStep(instructions), nil
 	}

@@ -49,6 +49,8 @@ const (
 	qrResponseReadFailed
 	qrResponseTooLarge
 	qrSessionValidationFailed
+	qrLinkExpired
+	qrDeviceConfirmationRequired
 )
 
 func (r slackQRReason) String() string {
@@ -59,6 +61,7 @@ func (r slackQRReason) String() string {
 		"missing_challenge_fields", "missing_session_token", "missing_session_cookie",
 		"redirect_limit", "unsafe_request", "request_build_failed", "transport_failed",
 		"http_status_failed", "response_read_failed", "response_too_large", "session_validation_failed",
+		"link_expired", "device_confirmation_required",
 	}
 	if int(r) >= len(names) {
 		return "unknown"
