@@ -98,6 +98,7 @@ func (s *SlackQRLogin) SubmitUserInput(parent context.Context, input map[string]
 	s.challenge = nil
 	if err != nil {
 		// Never return a transport error containing a one-time URL, token or cookie.
+		logSlackQRDiagnostic(ctx, qrSessionValidationFailed, qrPhaseComplete, 0, 0)
 		return slackQRStep("The bridge could not validate the Slack session. Try a fresh QR or another sign-in method."), nil
 	}
 	s.mu.Lock()

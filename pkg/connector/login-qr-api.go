@@ -73,11 +73,13 @@ func safeSlackQRURL(u *url.URL) bool {
 func (s *slackQRAPI) begin(ctx context.Context, raw string) (*slackQRResult, error) {
 	link, err := parseSlackQRLink(raw)
 	if err != nil {
+		logSlackQRDiagnostic(ctx, qrInvalidLink, qrPhaseBegin, 0, 0)
 		return nil, err
 	}
 	// A retried link must not inherit a previous attempt's credentials.
 	jar, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
 	if err != nil {
+		logSlackQRDiagnostic(ctx, qrCookieJarFailed, qrPhaseBegin, 0, 0)
 		return nil, errSlackQRFailed
 	}
 	client := *s.client
@@ -89,6 +91,7 @@ func (s *slackQRAPI) begin(ctx context.Context, raw string) (*slackQRResult, err
 
 func (s *slackQRAPI) confirm(ctx context.Context, c *slackQRChallenge, code string) (*slackQRResult, error) {
 	if c == nil || !qrConfirmationURL(c.url, c.link) || !slackTwoFactorPattern.MatchString(code) {
+		logSlackQRDiagnostic(ctx, qrInvalidConfirmation, qrPhaseConfirm, 0, 0)
 		return nil, errSlackQRInvalid
 	}
 	target := *c.url
@@ -98,8 +101,12 @@ func (s *slackQRAPI) confirm(ctx context.Context, c *slackQRChallenge, code stri
 }
 
 func (s *slackQRAPI) walk(ctx context.Context, link *slackQRLink, method string, target *url.URL, form url.Values) (*slackQRResult, error) {
+	phase := qrPhaseBegin
+	if method == http.MethodPost {
+		phase = qrPhaseConfirm
+	}
 	for hop := 0; hop < slackQRMaxHops; hop++ {
-		body, location, status, err := s.request(ctx, method, target, form)
+		body, location, status, err := s.request(ctx, method, target, form, phase, hop+1)
 		if err != nil {
 			return nil, err
 		}
@@ -108,25 +115,30 @@ func (s *slackQRAPI) walk(ctx context.Context, link *slackQRLink, method string,
 		}
 		if status >= 300 && status < 400 {
 			if location == "" {
+				logSlackQRDiagnostic(ctx, qrMissingRedirect, phase, status, hop+1)
 				return nil, errSlackQRFailed
 			}
 			next, err := target.Parse(location)
 			if err != nil || !safeSlackQRURL(next) {
+				logSlackQRDiagnostic(ctx, qrUnsafeRedirect, phase, status, hop+1)
 				return nil, errSlackQRBrowser
 			}
 			// Never replay a confirmation POST/code to a redirect target.
 			if method != http.MethodGet && status != http.StatusSeeOther && status != http.StatusFound && status != http.StatusMovedPermanently {
+				logSlackQRDiagnostic(ctx, qrPostReplayBlocked, phase, status, hop+1)
 				return nil, errSlackQRBrowser
 			}
 			target, method, form = next, http.MethodGet, nil
 			continue
 		}
-		challenge := parseQRChallenge(body, target, link)
+		challenge, reason := parseQRChallenge(body, target, link)
 		if challenge != nil {
 			return &slackQRResult{challenge: challenge}, nil
 		}
+		logSlackQRDiagnostic(ctx, reason, phase, status, hop+1)
 		return nil, errSlackQRBrowser
 	}
+	logSlackQRDiagnostic(ctx, qrRedirectLimit, phase, 0, slackQRMaxHops)
 	return nil, errSlackQRFailed
 }
 
@@ -134,15 +146,15 @@ func qrConfirmationURL(u *url.URL, link *slackQRLink) bool {
 	return link != nil && safeSlackQRURL(u) && u.Hostname() == link.workspace+".slack.com" && u.EscapedPath() == "/login/"+link.secret
 }
 
-func parseQRChallenge(body []byte, target *url.URL, link *slackQRLink) *slackQRChallenge {
+func parseQRChallenge(body []byte, target *url.URL, link *slackQRLink) (*slackQRChallenge, slackQRReason) {
 	if !qrConfirmationURL(target, link) {
-		return nil
+		return nil, qrUnexpectedChallengeRoute
 	}
 	tokenizer := html.NewTokenizer(strings.NewReader(string(body)))
 	for {
 		kind := tokenizer.Next()
 		if kind == html.ErrorToken {
-			return nil
+			return nil, qrMissingChallengeProps
 		}
 		if kind != html.StartTagToken && kind != html.SelfClosingTagToken {
 			continue
@@ -164,11 +176,14 @@ func parseQRChallenge(body []byte, target *url.URL, link *slackQRLink) *slackQRC
 			Magic string `json:"magicLogin"`
 			Email string `json:"emailAddress"`
 		}
-		if json.Unmarshal([]byte(props), &parsed) != nil || parsed.Magic == "" || parsed.Email == "" {
-			return nil
+		if json.Unmarshal([]byte(props), &parsed) != nil {
+			return nil, qrInvalidChallengeProps
+		}
+		if parsed.Magic == "" || parsed.Email == "" {
+			return nil, qrMissingChallengeFields
 		}
 		copyURL := *target
-		return &slackQRChallenge{link: link, url: &copyURL, magic: parsed.Magic, email: parsed.Email}
+		return &slackQRChallenge{link: link, url: &copyURL, magic: parsed.Magic, email: parsed.Email}, qrReasonNone
 	}
 }
 
@@ -193,13 +208,18 @@ func (s *slackQRAPI) cookie(link *slackQRLink) string {
 func (s *slackQRAPI) session(ctx context.Context, link *slackQRLink) (*slackQRResult, error) {
 	target := &url.URL{Scheme: "https", Host: link.workspace + ".slack.com", Path: "/ssb/redirect"}
 	for hop := 0; hop < slackQRMaxHops; hop++ {
-		body, location, status, err := s.request(ctx, http.MethodGet, target, nil)
+		body, location, status, err := s.request(ctx, http.MethodGet, target, nil, qrPhaseSession, hop+1)
 		if err != nil {
 			return nil, err
 		}
 		if status >= 300 && status < 400 {
 			next, err := target.Parse(location)
 			if location == "" || err != nil || !safeSlackQRURL(next) {
+				reason := qrUnsafeRedirect
+				if location == "" {
+					reason = qrMissingRedirect
+				}
+				logSlackQRDiagnostic(ctx, reason, qrPhaseSession, status, hop+1)
 				return nil, errSlackQRBrowser
 			}
 			target = next
@@ -207,20 +227,24 @@ func (s *slackQRAPI) session(ctx context.Context, link *slackQRLink) (*slackQRRe
 		}
 		match := qrWebTokenPattern.FindSubmatch(body)
 		if match == nil {
+			logSlackQRDiagnostic(ctx, qrMissingSessionToken, qrPhaseSession, status, hop+1)
 			return nil, errSlackQRBrowser
 		}
 		cookie := s.cookie(link)
 		if cookie == "" {
+			logSlackQRDiagnostic(ctx, qrMissingSessionCookie, qrPhaseSession, status, hop+1)
 			return nil, errSlackQRFailed
 		}
 		return &slackQRResult{token: string(match[1]), cookie: cookie}, nil
 	}
+	logSlackQRDiagnostic(ctx, qrRedirectLimit, qrPhaseSession, 0, slackQRMaxHops)
 	return nil, errSlackQRFailed
 }
 
 // Deliberately suppress net/url errors: their Error() embeds secret-bearing URLs.
-func (s *slackQRAPI) request(ctx context.Context, method string, target *url.URL, form url.Values) ([]byte, string, int, error) {
+func (s *slackQRAPI) request(ctx context.Context, method string, target *url.URL, form url.Values, phase slackQRPhase, hop int) ([]byte, string, int, error) {
 	if !safeSlackQRURL(target) {
+		logSlackQRDiagnostic(ctx, qrUnsafeRequest, phase, 0, hop)
 		return nil, "", 0, errSlackQRInvalid
 	}
 	var reader io.Reader
@@ -229,6 +253,7 @@ func (s *slackQRAPI) request(ctx context.Context, method string, target *url.URL
 	}
 	req, err := http.NewRequestWithContext(ctx, method, target.String(), reader)
 	if err != nil {
+		logSlackQRDiagnostic(ctx, qrRequestBuildFailed, phase, 0, hop)
 		return nil, "", 0, errSlackQRFailed
 	}
 	req.Header.Set("User-Agent", slack.DefaultUserAgent)
@@ -237,14 +262,21 @@ func (s *slackQRAPI) request(ctx context.Context, method string, target *url.URL
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
+		logSlackQRDiagnostic(ctx, qrTransportFailed, phase, 0, hop)
 		return nil, "", 0, errSlackQRFailed
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		logSlackQRDiagnostic(ctx, qrHTTPStatusFailed, phase, resp.StatusCode, hop)
 		return nil, "", 0, errSlackQRFailed
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, slackLoginMaxResponseSize+1))
-	if err != nil || len(body) > slackLoginMaxResponseSize {
+	if err != nil {
+		logSlackQRDiagnostic(ctx, qrResponseReadFailed, phase, resp.StatusCode, hop)
+		return nil, "", 0, errSlackQRFailed
+	}
+	if len(body) > slackLoginMaxResponseSize {
+		logSlackQRDiagnostic(ctx, qrResponseTooLarge, phase, resp.StatusCode, hop)
 		return nil, "", 0, errSlackQRFailed
 	}
 	return body, resp.Header.Get("Location"), resp.StatusCode, nil
