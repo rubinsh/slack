@@ -54,6 +54,10 @@ func slackQRPageDenial(body []byte) slackQRReason {
 					hasAttr = more
 				}
 				if hidden {
+					switch tag {
+					case "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr":
+						continue
+					}
 					ignored, ignoredDepth = tag, 1
 					continue
 				}

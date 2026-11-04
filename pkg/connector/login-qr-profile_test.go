@@ -43,6 +43,8 @@ func TestSlackQRRecognizedDenialPages(t *testing.T) {
 		{"expired alternate", "<h2>This link has expired</h2>", qrLinkExpired},
 		{"other device heading", "<h1>Sign in on your other device</h1>", qrDeviceConfirmationRequired},
 		{"other device title", "<title>Confirm this sign-in on your other device | Slack</title>", qrDeviceConfirmationRequired},
+		{"hidden void image before heading", `<img aria-hidden="true" src="synthetic"><h1>Link Expired</h1>`, qrLinkExpired},
+		{"hidden void input before heading", `<input hidden><h1>Sign in on your other device</h1>`, qrDeviceConfirmationRequired},
 		{"generic confirm is not evidence", "<h1>Confirm your email</h1><p>Open Slack to continue.</p>", qrReasonNone},
 		{"trouble signing in is not expiry proof", "<h1>We had trouble signing you in</h1>", qrReasonNone},
 		{"ordinary link label", "<a>Link Expired</a>", qrReasonNone},
