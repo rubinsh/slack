@@ -215,14 +215,14 @@ func logSlackQRDiagnostic(ctx context.Context, reason slackQRReason, phase slack
 		hop = 0
 	}
 	event := zerolog.Ctx(ctx).Warn().
-		Str("qr_reason", reason.String()).
-		Str("qr_phase", phase.String()).
+		Stringer("qr_reason", reason).
+		Stringer("qr_phase", phase).
 		Int("http_status", status).
 		Int("hop", hop)
 	if len(detail) > 0 {
-		event = event.Str("route_class", detail[0].route.String()).
-			Str("path_class", detail[0].path.String()).
-			Str("props_class", detail[0].props.String()).
+		event = event.Stringer("route_class", detail[0].route).
+			Stringer("path_class", detail[0].path).
+			Stringer("props_class", detail[0].props).
 			Bool("has_d_cookie", detail[0].hasDCookie)
 	}
 	event.Msg("Slack QR sign-in could not advance")

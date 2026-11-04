@@ -18,10 +18,10 @@ import (
 
 var (
 	errSlackQRInvalid = errors.New("invalid Slack QR link")
-	errSlackQRBrowser = errors.New("Slack QR sign-in requires an unsupported step")
-	errSlackQRExpired = errors.New("Slack QR link expired or was already used")
-	errSlackQRDevice  = errors.New("Slack QR sign-in requires device confirmation")
-	errSlackQRFailed  = errors.New("Slack QR sign-in did not complete")
+	errSlackQRBrowser = errors.New("unsupported step required for Slack QR sign-in")
+	errSlackQRExpired = errors.New("expired or already-used Slack QR link")
+	errSlackQRDevice  = errors.New("device confirmation required for Slack QR sign-in")
+	errSlackQRFailed  = errors.New("failed to complete Slack QR sign-in")
 	qrPathPattern     = regexp.MustCompile(`^/t/([a-z0-9][a-z0-9-]*)/login/(z-app-[A-Za-z0-9_-]+)$`)
 	qrWebTokenPattern = regexp.MustCompile(`"api_token"\s*:\s*"(xoxc-[a-zA-Z0-9-]+)"`)
 )
